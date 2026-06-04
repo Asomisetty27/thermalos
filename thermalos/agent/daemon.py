@@ -32,6 +32,7 @@ from .classifier import StateClassifier
 from .detector   import DriftDetector, DriftResult
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
+from .silicon    import EccMonitor, MicroThrottleDetector
 from .alerter    import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
 from .exporter   import PrometheusExporter
 
@@ -83,9 +84,11 @@ class ThermalOSAgent:
         self._window       = SteadyStateWindow(config.window_sec, config.sigma_threshold)
         self._classifier   = StateClassifier(prefer_interpretable=config.prefer_dt)
         self._detector     = DriftDetector(config.k_warn, config.k_critical)
-        self._statemachine = GPUStateMachine()
-        self._correlator   = FleetCorrelator()
-        self._router       = self._build_router()
+        self._statemachine   = GPUStateMachine()
+        self._correlator     = FleetCorrelator()
+        self._ecc_monitor    = EccMonitor()
+        self._micro_throttle = MicroThrottleDetector()
+        self._router         = self._build_router()
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
         self._tick_count  = 0
@@ -105,6 +108,16 @@ class ThermalOSAgent:
         """Process one GPU sample through the full pipeline."""
         gpu = raw_sample.gpu_index
         ts  = raw_sample.timestamp
+
+        # 0. Silicon-level checks run on every sample (before steady-state filter)
+        for silicon_alert in (
+            self._ecc_monitor.update(raw_sample),
+            self._micro_throttle.update(raw_sample),
+        ):
+            if silicon_alert is not None:
+                self._alert_count += 1
+                self._exporter.record_alert(silicon_alert)
+                await self._router.route(silicon_alert)
 
         # 1. Update virtual ambient from idle windows
         self._baseline.update(

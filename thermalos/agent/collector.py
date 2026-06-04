@@ -90,7 +90,6 @@ class NVMLCollector:
         pstate = pynvml.nvmlDeviceGetPerformanceState(handle)
 
         try:
-            clocks = pynvml.nvmlDeviceGetClockInfo
             sm_mhz  = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
             mem_mhz = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
         except Exception:
@@ -101,17 +100,47 @@ class NVMLCollector:
         except pynvml.NVMLError:
             fan = None
 
+        # Silicon-level health metrics — each wrapped independently so a single
+        # unsupported query on older drivers doesn't drop the whole sample
+        try:
+            ecc_sbit = pynvml.nvmlDeviceGetTotalEccErrors(
+                handle, pynvml.NVML_SINGLE_BIT_ECC, pynvml.NVML_VOLATILE_ECC
+            )
+        except pynvml.NVMLError:
+            ecc_sbit = 0
+
+        try:
+            ecc_dbit = pynvml.nvmlDeviceGetTotalEccErrors(
+                handle, pynvml.NVML_DOUBLE_BIT_ECC, pynvml.NVML_VOLATILE_ECC
+            )
+        except pynvml.NVMLError:
+            ecc_dbit = 0
+
+        try:
+            throttle_reasons = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(handle)
+        except pynvml.NVMLError:
+            throttle_reasons = 0
+
+        try:
+            sm_clock_max_mhz = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM)
+        except pynvml.NVMLError:
+            sm_clock_max_mhz = 0
+
         return RawSample(
-            gpu_index     = idx,
-            timestamp     = time.time(),
-            temp_junction = float(temp),
-            power_w       = float(power),
-            util_pct      = float(util.gpu),
-            mem_util_pct  = float(util.memory),
-            perf_state    = int(str(pstate).replace("PerformanceState_", "").replace("P", "")),
-            clock_sm_mhz  = sm_mhz,
-            clock_mem_mhz = mem_mhz,
-            fan_speed_pct = float(fan) if fan is not None else None,
+            gpu_index        = idx,
+            timestamp        = time.time(),
+            temp_junction    = float(temp),
+            power_w          = float(power),
+            util_pct         = float(util.gpu),
+            mem_util_pct     = float(util.memory),
+            perf_state       = int(str(pstate).replace("PerformanceState_", "").replace("P", "")),
+            clock_sm_mhz     = sm_mhz,
+            clock_mem_mhz    = mem_mhz,
+            fan_speed_pct    = float(fan) if fan is not None else None,
+            ecc_sbit         = int(ecc_sbit),
+            ecc_dbit         = int(ecc_dbit),
+            throttle_reasons = int(throttle_reasons),
+            sm_clock_max_mhz = sm_clock_max_mhz,
         )
 
     def _collect_demo(self, idx: int) -> RawSample:
@@ -131,17 +160,23 @@ class NVMLCollector:
             power, util, ps = 11.4, 0.0, 8
 
         noise = 0.5 * math.sin(t * 7.3 + idx)
+        sm_max = 1980   # T4 boost clock
+        sm_cur = 1600 if ps == 0 else 300
         return RawSample(
-            gpu_index     = idx,
-            timestamp     = t,
-            temp_junction = temp + noise,
-            power_w       = power + abs(noise) * 0.3,
-            util_pct      = util,
-            mem_util_pct  = util * 0.6,
-            perf_state    = ps,
-            clock_sm_mhz  = 1600 if ps == 0 else 300,
-            clock_mem_mhz = 8000 if ps == 0 else 405,
-            fan_speed_pct = 40.0 + temp * 0.3,
+            gpu_index        = idx,
+            timestamp        = t,
+            temp_junction    = temp + noise,
+            power_w          = power + abs(noise) * 0.3,
+            util_pct         = util,
+            mem_util_pct     = util * 0.6,
+            perf_state       = ps,
+            clock_sm_mhz     = sm_cur,
+            clock_mem_mhz    = 8000 if ps == 0 else 405,
+            fan_speed_pct    = 40.0 + temp * 0.3,
+            ecc_sbit         = 0,
+            ecc_dbit         = 0,
+            throttle_reasons = 0,
+            sm_clock_max_mhz = sm_max,
         )
 
     async def collect_all(self) -> list[RawSample]:
