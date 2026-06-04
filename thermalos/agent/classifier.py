@@ -60,15 +60,15 @@ class StateClassifier:
     """
     Classifies GPU state from a stable WindowResult.
 
-    Priority: sklearn pkl model (NB) → DT pkl model → hard-coded rules.
-    The pkl models are trained via thermalos/models/train.py from Stage 1 data.
+    When both models are available, runs ensemble voting: NB + DT must agree
+    for full confidence. Disagreement caps confidence at 0.65 and logs the
+    conflict — useful signal for distribution shift (new GPU hardware, updated
+    firmware, workload patterns not in Stage 1 training data).
+
+    Priority: ensemble (NB + DT) → single DT → single NB → hard-coded rules.
     """
 
     def __init__(self, prefer_interpretable: bool = True):
-        """
-        prefer_interpretable=True → use Decision Tree (100% acc, publishable rules)
-        prefer_interpretable=False → use Naive Bayes (99.8% acc, probabilistic output)
-        """
         self._prefer_dt  = prefer_interpretable
         self._nb_model   = None
         self._dt_model   = None
@@ -78,16 +78,22 @@ class StateClassifier:
     def _load_models(self) -> None:
         try:
             import joblib
-            if DT_MODEL_PATH.exists() and self._prefer_dt:
+            # Always attempt to load BOTH models for ensemble
+            if DT_MODEL_PATH.exists():
                 self._dt_model = joblib.load(DT_MODEL_PATH)
-                self._mode = "dt"
                 log.info("Loaded Decision Tree model from bundle")
-            elif NB_MODEL_PATH.exists():
+            if NB_MODEL_PATH.exists():
                 self._nb_model = joblib.load(NB_MODEL_PATH)
-                self._mode = "nb"
                 log.info("Loaded Naive Bayes model from bundle")
+
+            if self._dt_model and self._nb_model:
+                self._mode = "ensemble"
+            elif self._dt_model:
+                self._mode = "dt"
+            elif self._nb_model:
+                self._mode = "nb"
             else:
-                log.warning("No bundled model found — using hard-coded DT rules (still 100% on Stage 1)")
+                log.warning("No bundled models found — using hard-coded DT rules (100% Stage 1 accuracy)")
         except ImportError:
             log.warning("joblib not available — using hard-coded DT rules")
 
@@ -95,6 +101,10 @@ class StateClassifier:
         """
         Returns (state, confidence) from a steady-state window.
         Only call when window.is_stable == True.
+
+        In ensemble mode: both models vote. Agreement boosts confidence by 5%
+        (capped at 1.0). Disagreement uses the DT prediction but caps
+        confidence at 0.65, signalling uncertainty to the caller.
         """
         X = np.array([[
             window.rtheta_mean,
@@ -102,6 +112,29 @@ class StateClassifier:
             window.last_util,
             float(window.last_pstate),
         ]])
+
+        if self._mode == "ensemble":
+            dt_pred  = int(self._dt_model.predict(X)[0])
+            nb_pred  = int(self._nb_model.predict(X)[0])
+            dt_proba = self._dt_model.predict_proba(X)[0]
+            nb_proba = self._nb_model.predict_proba(X)[0]
+            dt_conf  = float(dt_proba[dt_pred])
+            nb_conf  = float(nb_proba[nb_pred])
+
+            if dt_pred == nb_pred:
+                state      = CLASS_INDEX_TO_STATE.get(dt_pred, GPUState.UNKNOWN)
+                confidence = min(1.0, (dt_conf + nb_conf) / 2 * 1.05)
+            else:
+                # Models disagree — use DT (interpretable) but flag low confidence
+                state      = CLASS_INDEX_TO_STATE.get(dt_pred, GPUState.UNKNOWN)
+                confidence = min(dt_conf, 0.65)
+                log.info(
+                    "ensemble_disagree",
+                    dt_pred=dt_pred, nb_pred=nb_pred,
+                    dt_conf=round(dt_conf, 3), nb_conf=round(nb_conf, 3),
+                    rtheta=window.rtheta_mean,
+                )
+            return state, confidence
 
         if self._mode == "dt" and self._dt_model is not None:
             pred = int(self._dt_model.predict(X)[0])
@@ -118,7 +151,7 @@ class StateClassifier:
             conf  = float(proba[pred])
             return CLASS_INDEX_TO_STATE.get(pred, GPUState.UNKNOWN), conf
 
-        # Fallback: hard-coded DT rules
+        # Fallback: hard-coded DT rules derived from Orange analysis
         return _rule_classify(window.rtheta_mean, window.last_power, window.last_pstate)
 
     @property

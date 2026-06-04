@@ -24,15 +24,16 @@ from typing import Optional
 
 import structlog
 
-from .collector import NVMLCollector, CollectorConfig
-from .metrics   import EnrichedSample, GPUState, ClassifiedSample, enrich
-from .baseline  import BaselineManager
-from .window    import SteadyStateWindow, SIGMA_STRICT
+from .collector  import NVMLCollector, CollectorConfig
+from .metrics    import EnrichedSample, GPUState, ClassifiedSample, AlertEvent, enrich
+from .baseline   import BaselineManager
+from .window     import SteadyStateWindow, SIGMA_STRICT
 from .classifier import StateClassifier
-from .detector  import DriftDetector, DriftResult
-from .state     import GPUStateMachine
-from .alerter   import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
-from .exporter  import PrometheusExporter
+from .detector   import DriftDetector, DriftResult
+from .state      import GPUStateMachine
+from .correlator import FleetCorrelator
+from .alerter    import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
+from .exporter   import PrometheusExporter
 
 log = structlog.get_logger(__name__)
 
@@ -78,13 +79,14 @@ class ThermalOSAgent:
         self.config     = config
         self._shutdown  = asyncio.Event()
 
-        self._baseline   = BaselineManager()
-        self._window     = SteadyStateWindow(config.window_sec, config.sigma_threshold)
-        self._classifier = StateClassifier(prefer_interpretable=config.prefer_dt)
-        self._detector   = DriftDetector(config.k_warn, config.k_critical)
+        self._baseline     = BaselineManager()
+        self._window       = SteadyStateWindow(config.window_sec, config.sigma_threshold)
+        self._classifier   = StateClassifier(prefer_interpretable=config.prefer_dt)
+        self._detector     = DriftDetector(config.k_warn, config.k_critical)
         self._statemachine = GPUStateMachine()
-        self._router     = self._build_router()
-        self._exporter   = PrometheusExporter(config.prometheus_port)
+        self._correlator   = FleetCorrelator()
+        self._router       = self._build_router()
+        self._exporter     = PrometheusExporter(config.prometheus_port)
 
         self._tick_count  = 0
         self._alert_count = 0
@@ -155,6 +157,47 @@ class ThermalOSAgent:
             if alert.state not in (GPUState.CLEAN_IDLE, GPUState.UNDER_LOAD):
                 explanation = self._classifier.explain(window)
                 log.info("classification_reason", gpu=gpu, reason=explanation)
+
+        # 7. Predictive alert — warn before the threshold is crossed
+        if drift.is_predictive:
+            eta_min = round(drift.eta_to_drift_s / 60, 1) if drift.eta_to_drift_s else "?"
+            pred_alert = AlertEvent(
+                gpu_index       = gpu,
+                timestamp       = ts,
+                state           = state,
+                prev_state      = state,
+                rtheta          = window.rtheta_mean,
+                rtheta_baseline = drift.baseline_mean,
+                drift_sigma     = drift.sigma_score,
+                confidence      = 0.8,
+                message         = (
+                    f"[WARNING] GPU {gpu} — predictive thermal drift. "
+                    f"R_θ trending at +{drift.trend_slope:.5f} C/W·s. "
+                    f"Estimated {eta_min} min until drift threshold. "
+                    f"No action required yet — monitor closely."
+                ),
+                context         = {
+                    "severity":    "warning",
+                    "predictive":  True,
+                    "eta_minutes": eta_min,
+                    "trend_slope": drift.trend_slope,
+                },
+            )
+            self._alert_count += 1
+            self._exporter.record_alert(pred_alert)
+            await self._router.route(pred_alert)
+            log.info("predictive_warning", gpu=gpu, eta_min=eta_min, slope=drift.trend_slope)
+
+        # 8. Fleet correlation — detect cross-GPU anomalies after each sample
+        fleet_alert = self._correlator.check(
+            {g: r.current_state for g, r in self._statemachine.all_states().items()},
+            ts,
+        )
+        if fleet_alert is not None:
+            self._alert_count += 1
+            self._exporter.record_alert(fleet_alert)
+            await self._router.route(fleet_alert)
+            log.warning("fleet_event", affected=fleet_alert.context.get("fleet_gpus"))
 
     async def run(self) -> None:
         """Main loop. Blocks until shutdown signal received."""

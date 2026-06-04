@@ -27,6 +27,10 @@ BASELINE_WINDOW  = 60    # number of stable samples for baseline rolling mean
 MIN_BASELINE_SAMPLES = 20  # minimum before we trust the baseline
 SUSTAINED_WINDOWS    = 3   # consecutive anomalous windows before alerting
 
+TREND_WINDOW         = 30   # samples for linear regression
+PREDICT_HORIZON_S    = 300  # 5 min — warn if threshold crossing within this window
+PREDICT_COOLDOWN_S   = 120  # seconds between repeated predictive warnings per GPU
+
 
 @dataclass
 class DriftResult:
@@ -38,7 +42,11 @@ class DriftResult:
     sigma_score:   Optional[float]   # how many σ above baseline
     is_drifting:  bool
     is_critical:  bool
-    confidence:   float             # 0–1 based on sustained window count
+    confidence:   float              # 0–1 based on sustained window count
+    # Predictive fields
+    trend_slope:      Optional[float] = None  # R_theta per second (positive = worsening)
+    eta_to_drift_s:   Optional[float] = None  # seconds until warn threshold crossed
+    is_predictive:    bool            = False  # ETA within PREDICT_HORIZON_S, GPU currently healthy
 
 
 class DriftDetector:
@@ -63,6 +71,8 @@ class DriftDetector:
 
         self._baselines:      dict[int, deque]         = {}
         self._anomaly_counts: dict[int, int]           = {}
+        self._trend_buffers:  dict[int, deque]         = {}
+        self._predict_alerted: dict[int, float]        = {}   # gpu → last predictive alert ts
 
     def update(
         self,
@@ -71,6 +81,11 @@ class DriftDetector:
         rtheta:    float,
         state:     GPUState,
     ) -> DriftResult:
+        # Trend buffer: ALL readings (healthy or not) for regression
+        if gpu_index not in self._trend_buffers:
+            self._trend_buffers[gpu_index] = deque(maxlen=TREND_WINDOW)
+        self._trend_buffers[gpu_index].append((timestamp, rtheta))
+
         # Update baseline from healthy windows only
         if state in BASELINE_HEALTHY_STATES:
             if gpu_index not in self._baselines:
@@ -115,6 +130,32 @@ class DriftDetector:
 
         confidence = min(1.0, count / self._sustained) if is_above_warn else 0.0
 
+        # ── Predictive trend regression ──────────────────────────────────────
+        trend_slope = eta_to_drift_s = None
+        is_predictive = False
+
+        tbuf = self._trend_buffers[gpu_index]
+        if len(tbuf) >= 10 and not is_drifting and not is_critical:
+            import numpy as np
+            xs = np.array([t for t, _ in tbuf], dtype=float)
+            ys = np.array([r for _, r in tbuf], dtype=float)
+            xs -= xs[0]   # normalize to zero-start
+            slope, intercept = np.polyfit(xs, ys, 1)
+            trend_slope = float(slope)
+
+            if slope > 0:
+                warn_threshold = mean + self._k_warn * std
+                t_elapsed = float(xs[-1])
+                predicted_now = slope * t_elapsed + intercept
+                if predicted_now < warn_threshold:
+                    eta = (warn_threshold - predicted_now) / slope
+                    if 0 < eta < PREDICT_HORIZON_S:
+                        last_pred = self._predict_alerted.get(gpu_index, 0.0)
+                        if timestamp - last_pred >= PREDICT_COOLDOWN_S:
+                            eta_to_drift_s = float(eta)
+                            is_predictive  = True
+                            self._predict_alerted[gpu_index] = timestamp
+
         return DriftResult(
             gpu_index     = gpu_index,
             timestamp     = timestamp,
@@ -125,6 +166,9 @@ class DriftDetector:
             is_drifting   = is_drifting,
             is_critical   = is_critical,
             confidence    = round(confidence, 2),
+            trend_slope   = round(trend_slope, 6) if trend_slope is not None else None,
+            eta_to_drift_s= round(eta_to_drift_s, 1) if eta_to_drift_s is not None else None,
+            is_predictive = is_predictive,
         )
 
     def reset_baseline(self, gpu_index: int) -> None:

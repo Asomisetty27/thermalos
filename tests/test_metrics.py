@@ -126,7 +126,7 @@ def test_rule_classify_clean_idle():
 
 def test_sklearn_classifier_loads():
     clf = StateClassifier(prefer_interpretable=True)
-    assert clf.mode in ("dt", "nb", "rules")
+    assert clf.mode in ("ensemble", "dt", "nb", "rules")
 
 def test_sklearn_classifier_under_load():
     clf = StateClassifier()
