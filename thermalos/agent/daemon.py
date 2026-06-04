@@ -32,8 +32,10 @@ from .classifier import StateClassifier
 from .detector   import DriftDetector, DriftResult
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
-from .silicon    import EccMonitor, MicroThrottleDetector
-from .alerter    import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
+from .silicon       import EccMonitor, MicroThrottleDetector
+from .unsupervised  import IsolationForestCritic
+from .dcgm_collector import DCGMEnricher
+from .alerter       import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
 from .exporter   import PrometheusExporter
 
 log = structlog.get_logger(__name__)
@@ -65,6 +67,9 @@ class AgentConfig:
     prometheus_port:    int   = 9101
     enable_prometheus:  bool  = True
 
+    # Optional DCGM enrichment (requires nv-hostengine running on the host)
+    use_dcgm:           bool  = False
+
 
 class ThermalOSAgent:
     """
@@ -88,6 +93,8 @@ class ThermalOSAgent:
         self._correlator     = FleetCorrelator()
         self._ecc_monitor    = EccMonitor()
         self._micro_throttle = MicroThrottleDetector()
+        self._critic         = IsolationForestCritic()
+        self._dcgm           = DCGMEnricher() if config.use_dcgm else None
         self._router         = self._build_router()
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
@@ -109,7 +116,11 @@ class ThermalOSAgent:
         gpu = raw_sample.gpu_index
         ts  = raw_sample.timestamp
 
-        # 0. Silicon-level checks run on every sample (before steady-state filter)
+        # 0a. DCGM enrichment — fills NVLink/PCIe/engine fields if nv-hostengine available
+        if self._dcgm is not None:
+            self._dcgm.enrich(gpu, raw_sample)
+
+        # 0b. Silicon-level checks run on every sample (before steady-state filter)
         for silicon_alert in (
             self._ecc_monitor.update(raw_sample),
             self._micro_throttle.update(raw_sample),
@@ -153,8 +164,20 @@ class ThermalOSAgent:
             rtheta_mean  = window.rtheta_mean,
         )
 
-        # 5. Drift detection
+        # 5. Drift detection + unsupervised critic
         drift = self._detector.update(gpu, ts, window.rtheta_mean, state)
+
+        # Feed healthy windows to the Isolation Forest baseline
+        healthy = state in (GPUState.CLEAN_IDLE, GPUState.UNDER_LOAD)
+        if healthy:
+            self._critic.update_healthy(gpu, window)
+
+        # Score and check for critic/supervised disagreement
+        critic_alert = self._critic.maybe_alert(gpu, window, state, ts)
+        if critic_alert is not None:
+            self._alert_count += 1
+            self._exporter.record_alert(critic_alert)
+            await self._router.route(critic_alert)
         self._exporter.update_drift(drift)
         self._exporter.update_state(gpu, state)
 
@@ -245,6 +268,8 @@ class ThermalOSAgent:
                     log.error("pipeline_error", exc_info=e)
 
         await self._router.close()
+        if self._dcgm:
+            self._dcgm.shutdown()
         log.info("agent_stopped", ticks=self._tick_count, alerts=self._alert_count)
 
     def status(self) -> dict:

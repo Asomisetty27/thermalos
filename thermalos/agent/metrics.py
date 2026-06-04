@@ -57,11 +57,17 @@ class RawSample:
     clock_sm_mhz:  int
     clock_mem_mhz: int
     fan_speed_pct: Optional[float] = None
-    # Silicon-level health fields (all Optional/defaulted for backward compat)
+    # Silicon-level health fields (pynvml)
     ecc_sbit:         int = 0    # single-bit ECC errors, volatile counter (correctable)
     ecc_dbit:         int = 0    # double-bit ECC errors, volatile counter (uncorrectable → GPU death signal)
     throttle_reasons: int = 0    # bitmask from nvmlDeviceGetCurrentClocksThrottleReasons
     sm_clock_max_mhz: int = 0    # max boost SM clock — used for clock efficiency ratio
+    # DCGM fields (populated only when use_dcgm=True and nv-hostengine is running)
+    nvlink_errors:    int   = 0    # total NVLink CRC + recovery errors
+    pcie_tx_kbps:     int   = 0    # PCIe transmit throughput (KiB/s)
+    pcie_rx_kbps:     int   = 0    # PCIe receive throughput (KiB/s)
+    gr_engine_active: float = 0.0  # graphics/compute engine active fraction 0–1 (DCGM prof)
+    dram_active:      float = 0.0  # memory interface active fraction 0–1 (DCGM prof)
 
 
 @dataclass(slots=True)
