@@ -305,6 +305,32 @@ def step_baseline(gpus: list[dict]) -> dict:
             baselines[g["index"]] = t_ref
     else:
         console.print()
+
+        # Check if NVML is actually available before attempting auto-detect.
+        # pynvml can be installed on macOS/CPU hosts but nvmlInit() fails at
+        # runtime. Detect this early and fall back to a sensible default rather
+        # than crashing mid-wizard.
+        _nvml_live = False
+        try:
+            import pynvml as _pynvml
+            _pynvml.nvmlInit()
+            _pynvml.nvmlShutdown()
+            _nvml_live = True
+        except Exception:
+            pass
+
+        if not _nvml_live:
+            warn("No NVIDIA GPU / driver detected — cannot auto-detect T_ref.")
+            info("Using default T_ref = 25.0°C (demo mode). Override with 'manual' next time.")
+            console.print()
+            baselines = {g["index"]: 25.0 for g in gpus}
+            from thermalos.agent.baseline import BaselineManager
+            bm_demo = BaselineManager()
+            for g in gpus:
+                bm_demo.set_manual(g["index"], 25.0)
+                ok(f"GPU {g['index']} T_ref = 25.0°C  (demo default)")
+            return baselines
+
         info("Waiting for stable idle windows. Make sure all GPUs are idle…")
         console.print()
 

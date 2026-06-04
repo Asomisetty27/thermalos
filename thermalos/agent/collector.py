@@ -62,7 +62,15 @@ class NVMLCollector:
             log.warning("pynvml not available — running in demo mode with synthetic data")
             self._n_gpus = 4
             return
-        pynvml.nvmlInit()
+        try:
+            pynvml.nvmlInit()
+        except pynvml.NVMLError:
+            # pynvml is installed but the NVIDIA driver / library is absent
+            # (common on macOS or CPU-only Linux boxes). Fall back to demo mode.
+            log.warning("NVML library not found — running in demo mode with synthetic data")
+            self._demo_mode = True
+            self._n_gpus = 4
+            return
         self._n_gpus = pynvml.nvmlDeviceGetCount()
         indices = self.config.gpu_indices or list(range(self._n_gpus))
         self._handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in indices]
