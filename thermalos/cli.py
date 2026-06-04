@@ -2,10 +2,10 @@
 ThermalOS CLI — thermalos <command>
 
 Commands:
+  setup       Interactive setup wizard (run this first)
   monitor     Run the monitoring agent (blocks)
   baseline    Run a baseline-only idle window scan
   classify    Single-snapshot classify all GPUs
-  status      Show current agent state (requires running agent)
   serve       Run agent + Prometheus metrics server only
   train       Retrain bundled models from Stage 1 CSV
 """
@@ -23,8 +23,22 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-app     = typer.Typer(name="thermalos", add_completion=False, pretty_exceptions_enable=False)
+app     = typer.Typer(
+    name="thermalos",
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    help="GPU thermal-power forensics. Run [bold green]thermalos setup[/] to get started.",
+)
 console = Console()
+
+
+# ── setup ─────────────────────────────────────────────────────────────────────
+
+@app.command()
+def setup():
+    """Interactive setup wizard. Run this first. (~90 seconds)"""
+    from .wizard import run_wizard
+    run_wizard()
 
 
 # ── monitor ───────────────────────────────────────────────────────────────────
