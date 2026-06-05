@@ -35,8 +35,8 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# API endpoint — replace with real Supabase edge function URL at launch
-TELEMETRY_ENDPOINT = "https://api.thermalos.io/v1/telemetry"
+# ThermalOS Intelligence Network endpoint — Supabase edge function (deployed)
+TELEMETRY_ENDPOINT = "https://gfghusfgnblazadnjvyk.supabase.co/functions/v1/telemetry_ingest"
 FLUSH_INTERVAL_S   = 86400   # 24 hours
 MIN_EVENTS_TO_SEND = 10      # don't bother sending tiny batches
 GPU_GEN_TAGS = {             # normalize GPU model to generation bucket
