@@ -480,8 +480,46 @@ def step_first_reading(gpus: list[dict], baselines: dict) -> None:
 
 
 # ── Step 6: Alert config ───────────────────────────────────────────────────────
+def step_redfish() -> dict:
+    """Step 4b: Optional Redfish/BMC out-of-band telemetry."""
+    console.print()
+    console.print(Panel(
+        f"  [bold {TEXT}]Optional: Redfish / BMC out-of-band telemetry[/]\n\n"
+        f"  On DGX B200 and other data center systems, the baseboard management\n"
+        f"  controller (BMC) exposes chassis-level data via Redfish REST API:\n"
+        f"  inlet air temperature, fan RPM, PSU health, NVLink fabric status.\n\n"
+        f"  [{GREEN}]Cross-layer correlation example:[/]\n"
+        f"  [{DIM}]GPU R_θ drifting + fan at 60% RPM → root cause is cooling path,[/]\n"
+        f"  [{DIM}]not silicon degradation. ThermalOS identifies this automatically.[/]\n\n"
+        f"  [{DIM}]Skip this on Colab, consumer GPUs, or any non-DGX host.[/]",
+        title=f"[{BLUE}]Redfish / BMC (optional)[/]",
+        title_align="left",
+        border_style=BLUE,
+        padding=(1, 2),
+    ))
+    console.print()
+
+    want_redfish = Confirm.ask(
+        f"  [{TEXT}]Enable Redfish / BMC out-of-band telemetry?[/]", default=False
+    )
+    if not want_redfish:
+        return {}
+
+    bmc_host = Prompt.ask(f"  [{TEXT}]BMC IP address or hostname[/]", default="192.168.1.1")
+    bmc_user = Prompt.ask(f"  [{TEXT}]BMC username[/]", default="admin")
+    bmc_pass = Prompt.ask(f"  [{TEXT}]BMC password[/]", password=True)
+
+    ok(f"Redfish configured: https://{bmc_host}/ (will probe on first run)")
+    return {
+        "use_redfish":      True,
+        "redfish_host":     bmc_host,
+        "redfish_user":     bmc_user,
+        "redfish_password": bmc_pass,
+    }
+
+
 def step_alerts() -> dict:
-    step_header(5, 6, "Alert setup", "Configure how you want to be notified")
+    step_header(5, 7, "Alert setup", "Configure how you want to be notified")
 
     console.print(Panel(
         f"  ThermalOS can alert you when a GPU transitions to an anomalous state.\n"
@@ -567,7 +605,7 @@ def step_intelligence_network() -> bool:
     return opt_in
 
 
-def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: dict, opt_in_telemetry: bool = False) -> None:
+def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: dict, opt_in_telemetry: bool = False, redfish_cfg: dict = {}) -> None:
     step_header(7, 7, "All set", "Config saved — ready to monitor")
 
     config = {
@@ -582,7 +620,11 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
         "prefer_dt":      True,
         "k_warn":         2.0,
         "k_critical":     3.5,
-        "data_sharing":   opt_in_telemetry,
+        "data_sharing":      opt_in_telemetry,
+        "use_redfish":       redfish_cfg.get("use_redfish", False),
+        "redfish_host":      redfish_cfg.get("redfish_host"),
+        "redfish_user":      redfish_cfg.get("redfish_user"),
+        "redfish_password":  redfish_cfg.get("redfish_password"),
     }
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -668,9 +710,10 @@ def run_wizard() -> None:
         gpus     = step_gpu_inventory(sys_info)
         baselines = step_baseline(gpus)
         step_first_reading(gpus, baselines)
+        redfish_cfg = step_redfish()
         alert_cfg = step_alerts()
         opt_in_telemetry = step_intelligence_network()
-        step_finish(sys_info, gpus, baselines, alert_cfg, opt_in_telemetry)
+        step_finish(sys_info, gpus, baselines, alert_cfg, opt_in_telemetry, redfish_cfg)
     except KeyboardInterrupt:
         console.print(f"\n\n  [{DIM}]Setup cancelled. Run [bold]thermalos setup[/] to start again.[/]\n")
         sys.exit(0)

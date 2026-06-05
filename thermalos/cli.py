@@ -109,6 +109,10 @@ def monitor(
         k_warn            = sigma_warn,
         k_critical        = sigma_crit,
         data_sharing      = saved.get("data_sharing", False),
+        use_redfish       = saved.get("use_redfish", False),
+        redfish_host      = saved.get("redfish_host"),
+        redfish_user      = saved.get("redfish_user"),
+        redfish_password  = saved.get("redfish_password"),
     )
 
     # rebind so the banner below uses resolved values
