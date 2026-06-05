@@ -134,6 +134,51 @@ class BaselineManager:
     def has_baseline(self, gpu_index: int) -> bool:
         return gpu_index in self._baselines
 
+    def maybe_update_longrun(
+        self,
+        gpu_index: int,
+        temp: float,
+        util: float,
+        pstate: int,
+        ts: float,
+        alpha: float = 0.05,
+    ) -> bool:
+        """
+        Soft-update T_ref during brief idle windows within a long-running job.
+
+        Uses exponential smoothing (not a hard re-lock) so a 3°C diurnal ambient
+        rise gradually shifts T_ref upward, while a rapid R_theta spike (actual
+        degradation) is not absorbed. Returns True if T_ref was updated.
+
+        Only applies when:
+        - A baseline is already locked (don't create one from scratch here)
+        - The GPU enters a transient idle window (util < threshold, pstate ≥ min)
+        - The proposed new T_ref is within 5°C of the existing one (sanity gate)
+        """
+        if gpu_index not in self._baselines:
+            return False
+        if util > IDLE_UTIL_MAX or pstate < IDLE_PSTATE_MIN:
+            return False
+
+        existing = self._baselines[gpu_index]
+        if abs(temp - existing.t_ref) > 5.0:
+            # Difference too large — this is not ambient drift, don't absorb it
+            return False
+
+        new_tref = round(existing.t_ref * (1 - alpha) + temp * alpha, 2)
+        if new_tref == existing.t_ref:
+            return False
+
+        self._baselines[gpu_index] = Baseline(
+            gpu_index = gpu_index,
+            t_ref     = new_tref,
+            sigma     = existing.sigma,
+            n_samples = existing.n_samples,
+            locked_at = existing.locked_at,
+            source    = "longrun_update",
+        )
+        return True
+
     def set_manual(self, gpu_index: int, t_ref: float) -> None:
         self._baselines[gpu_index] = Baseline(
             gpu_index = gpu_index,

@@ -62,6 +62,9 @@ class RawSample:
     ecc_dbit:         int = 0    # double-bit ECC errors, volatile counter (uncorrectable → GPU death signal)
     throttle_reasons: int = 0    # bitmask from nvmlDeviceGetCurrentClocksThrottleReasons
     sm_clock_max_mhz: int = 0    # max boost SM clock — used for clock efficiency ratio
+    # Collector health (poll timing)
+    poll_latency_s:   float = 0.0  # seconds taken to collect this sample from NVML
+
     # DCGM fields (populated only when use_dcgm=True and nv-hostengine is running)
     nvlink_errors:    int   = 0    # total NVLink CRC + recovery errors
     pcie_tx_kbps:     int   = 0    # PCIe transmit throughput (KiB/s)

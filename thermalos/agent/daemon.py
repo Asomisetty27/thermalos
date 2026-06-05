@@ -32,7 +32,7 @@ from .classifier import StateClassifier
 from .detector   import DriftDetector, DriftResult
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
-from .silicon         import EccMonitor, MicroThrottleDetector
+from .silicon         import EccMonitor, MicroThrottleDetector, XIDParser
 from .unsupervised    import IsolationForestCritic
 from .dcgm_collector  import DCGMEnricher
 from .telemetry          import TelemetryReporter
@@ -40,6 +40,8 @@ from .predictor          import FailurePredictor
 from .sdc_hunter         import SDCHunter
 from .redfish_collector  import RedfishEnricher
 from .alerter            import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
+from .health_api         import HealthAPIServer
+from ..                  import __version__
 from .exporter   import PrometheusExporter
 
 log = structlog.get_logger(__name__)
@@ -73,6 +75,9 @@ class AgentConfig:
 
     # Optional DCGM enrichment (requires nv-hostengine running on the host)
     use_dcgm:           bool  = False
+
+    # Health API server
+    health_api_port:    int   = 9102   # 0 = disabled
 
     # Optional Redfish/BMC out-of-band telemetry
     use_redfish:        bool  = False
@@ -108,8 +113,15 @@ class ThermalOSAgent:
         self._micro_throttle = MicroThrottleDetector()
         self._critic         = IsolationForestCritic()
         self._dcgm           = DCGMEnricher() if config.use_dcgm else None
+        self._xid_parser     = XIDParser()
         self._predictor      = FailurePredictor()
         self._sdc_hunter     = SDCHunter(config.gpu_indices)
+
+        # Poll latency tracking — rolling mean per GPU (for health API + observability)
+        self._poll_latency_ema: dict[int, float] = {}
+        self._poll_latency_baseline: dict[int, float] = {}
+        self._poll_latency_samples: dict[int, int] = {}
+        self._poll_latency_alert_ts: dict[int, float] = {}
         self._redfish        = (
             RedfishEnricher(config.redfish_host, config.redfish_user, config.redfish_password)
             if config.use_redfish and config.redfish_host else None
@@ -120,6 +132,15 @@ class ThermalOSAgent:
         # Per-GPU live state for SDC hunter cross-GPU validation
         self._gpu_util:  dict[int, float] = {}
         self._gpu_power: dict[int, float] = {}
+
+        # Health API — exposes /api/v1/health for SLURM prolog / MPI integration
+        self._health_api: Optional[HealthAPIServer] = None
+        if config.health_api_port > 0:
+            self._health_api = HealthAPIServer(
+                port             = config.health_api_port,
+                get_status       = self._health_status,
+                get_poll_latency = lambda: self._poll_latency_ema,
+            )
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
         self._tick_count  = 0
@@ -144,11 +165,55 @@ class ThermalOSAgent:
         self._gpu_util[gpu]  = raw_sample.util_pct
         self._gpu_power[gpu] = raw_sample.power_w
 
+        # XID parsing runs once per minute (rate-limited internally)
+        for xid_gpu, xid, xid_count in self._xid_parser.poll(ts):
+            xid_alert = self._xid_parser.make_alert(xid_gpu, xid, xid_count, ts)
+            if xid_alert:
+                self._alert_count += 1
+                self._exporter.record_alert(xid_alert)
+                await self._router.route(xid_alert)
+                log.warning("xid_event", gpu=xid_gpu, xid=xid, category=xid_alert.context.get("xid_category"))
+
+        # ── Poll latency tracking (monitoring pipeline observability) ─────────
+        lat = raw_sample.poll_latency_s
+        alpha = 0.1
+        ema = self._poll_latency_ema.get(gpu, lat)
+        new_ema = ema * (1 - alpha) + lat * alpha
+        self._poll_latency_ema[gpu] = new_ema
+
+        n = self._poll_latency_samples.get(gpu, 0) + 1
+        self._poll_latency_samples[gpu] = n
+        if n == 20:  # establish baseline after warm-up
+            self._poll_latency_baseline[gpu] = new_ema
+
+        baseline_lat = self._poll_latency_baseline.get(gpu)
+        if baseline_lat and new_ema > baseline_lat * 2.5 and n > 20:
+            last_lat_alert = self._poll_latency_alert_ts.get(gpu, 0.0)
+            if ts - last_lat_alert > 300:
+                self._poll_latency_alert_ts[gpu] = ts
+                lat_alert = AlertEvent(
+                    gpu_index=gpu, timestamp=ts,
+                    state=GPUState.UNKNOWN, prev_state=GPUState.UNKNOWN,
+                    rtheta=None, rtheta_baseline=None, drift_sigma=None,
+                    confidence=0.75,
+                    message=(
+                        f"[WARNING] GPU {gpu} — NVML poll latency {new_ema*1000:.1f}ms "
+                        f"({new_ema/baseline_lat:.1f}× baseline {baseline_lat*1000:.1f}ms). "
+                        f"GPU may be hanging or driver is unresponsive. "
+                        f"Monitor closely — abrupt failure possible."
+                    ),
+                    context={"severity": "warning", "poll_latency_ms": round(new_ema*1000, 2),
+                             "baseline_ms": round(baseline_lat*1000, 2)},
+                )
+                self._alert_count += 1
+                self._exporter.record_alert(lat_alert)
+                await self._router.route(lat_alert)
+
         # 0a. DCGM enrichment — fills NVLink/PCIe/engine fields if nv-hostengine available
         if self._dcgm is not None:
             self._dcgm.enrich(gpu, raw_sample)
 
-        # 0b. Silicon-level checks run on every sample (before steady-state filter)
+        # 0b. Silicon-level checks: ECC, micro-throttle, XID semantic parsing
         for silicon_alert in (
             self._ecc_monitor.update(raw_sample),
             self._micro_throttle.update(raw_sample),
@@ -158,8 +223,13 @@ class ThermalOSAgent:
                 self._exporter.record_alert(silicon_alert)
                 await self._router.route(silicon_alert)
 
-        # 1. Update virtual ambient from idle windows
+        # 1. Update virtual ambient — hard lock on first idle window,
+        #    soft exponential-smoothing update during long-run transient idles
         self._baseline.update(
+            gpu, raw_sample.temp_junction,
+            raw_sample.util_pct, raw_sample.perf_state, ts
+        )
+        self._baseline.maybe_update_longrun(
             gpu, raw_sample.temp_junction,
             raw_sample.util_pct, raw_sample.perf_state, ts
         )
@@ -310,6 +380,9 @@ class ThermalOSAgent:
         if self.config.enable_prometheus:
             self._exporter.start_server()
 
+        if self._health_api:
+            self._health_api.start()
+
         # Probe Redfish BMC once at startup
         if self._redfish:
             await self._redfish.probe()
@@ -377,6 +450,15 @@ class ThermalOSAgent:
         if self._redfish:
             self._redfish._available = False
         log.info("agent_stopped", ticks=self._tick_count, alerts=self._alert_count)
+
+    def _health_status(self) -> dict:
+        """Snapshot for the health API — includes degradation_risk from predictor."""
+        base = self.status()
+        for idx_str, gpu in base.get("gpus", {}).items():
+            idx = int(idx_str)
+            gpu["degradation_risk"] = self._predictor.get_score(idx)
+        base["agent_version"] = __version__
+        return base
 
     def status(self) -> dict:
         """Snapshot of current agent state — used by CLI `thermalos status`."""

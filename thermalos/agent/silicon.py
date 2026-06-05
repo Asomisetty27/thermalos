@@ -145,6 +145,131 @@ class EccMonitor:
         return None
 
 
+class XIDParser:
+    """
+    Parses the kernel ring buffer for NVIDIA XID error events and classifies
+    them by severity and failure type.
+
+    XID semantic categories (from NVIDIA XID Errors r590 docs):
+      SDC_PRECURSOR   : XID 13 — graphics engine exception (known SDC precursor)
+      MEMORY_ERROR    : XID 48, 63, 64, 92, 94, 95 — GPU memory faults
+      GPU_RESET       : XID 79 — GPU needs reset
+      FALLEN_OFF_BUS  : XID 31 — GPU unresponsive (PCI bus error)
+      ECC_UNCORRECTED : XID 48 — uncorrectable ECC
+      COMPUTE_ERROR   : XID 61, 62, 68 — CUDA/SM compute exceptions
+
+    Reads dmesg output (no root required on most Linux systems).
+    Polls once per POLL_INTERVAL_S; caches results between polls.
+    """
+
+    POLL_INTERVAL_S = 60
+
+    _SDC_PRECURSOR  = {13}
+    _MEMORY_ERRORS  = {48, 63, 64, 92, 94, 95}
+    _GPU_RESET      = {79}
+    _FALLEN_OFF_BUS = {31}
+    _COMPUTE_ERRORS = {61, 62, 68}
+
+    def __init__(self):
+        self._last_poll:   float = 0.0
+        self._last_counts: dict[int, dict[int, int]] = {}  # gpu → xid → count
+        self._prev_counts: dict[int, dict[int, int]] = {}
+
+    def _read_dmesg(self) -> dict[int, dict[int, int]]:
+        """Parse dmesg for NVRM XID lines. Returns {gpu_idx: {xid: count}}."""
+        import re
+        import subprocess
+        counts: dict[int, dict[int, int]] = {}
+        try:
+            result = subprocess.run(
+                ["dmesg", "--since", "-10min"],
+                capture_output=True, text=True, timeout=5.0
+            )
+            # Format: "NVRM: Xid (PCI:0000:01:00): 13, pid='<unknown>' ..."
+            # Also:  "NVRM: Xid (GPU-00000000): 48, ..."
+            pattern = re.compile(
+                r"NVRM:.*Xid.*\(.*\):\s*(\d+)", re.IGNORECASE
+            )
+            for line in result.stdout.splitlines():
+                m = pattern.search(line)
+                if m:
+                    xid = int(m.group(1))
+                    # Best-effort GPU index from PCI bus — default to 0 if unparseable
+                    gpu = 0
+                    bus_m = re.search(r"PCI:[\da-fA-F:]+:(\d+):", line)
+                    if bus_m:
+                        gpu = int(bus_m.group(1)) % 8  # slot within host
+                    counts.setdefault(gpu, {})
+                    counts[gpu][xid] = counts[gpu].get(xid, 0) + 1
+        except Exception:
+            pass
+        return counts
+
+    def poll(self, timestamp: float) -> list[tuple[int, int, int]]:
+        """
+        Returns list of (gpu_index, xid, new_count) for XIDs that appeared
+        since the last poll. Call once per monitoring tick.
+        """
+        if timestamp - self._last_poll < self.POLL_INTERVAL_S:
+            return []
+        self._last_poll  = timestamp
+        self._prev_counts = dict(self._last_counts)
+        self._last_counts = self._read_dmesg()
+
+        events = []
+        for gpu, xid_counts in self._last_counts.items():
+            for xid, count in xid_counts.items():
+                prev = self._prev_counts.get(gpu, {}).get(xid, 0)
+                if count > prev:
+                    events.append((gpu, xid, count - prev))
+        return events
+
+    def classify(self, xid: int) -> str:
+        if xid in self._SDC_PRECURSOR:
+            return "sdc_precursor"
+        if xid in self._MEMORY_ERRORS:
+            return "memory_error"
+        if xid in self._GPU_RESET:
+            return "gpu_reset_required"
+        if xid in self._FALLEN_OFF_BUS:
+            return "fallen_off_bus"
+        if xid in self._COMPUTE_ERRORS:
+            return "compute_error"
+        return "other"
+
+    def make_alert(self, gpu: int, xid: int, count: int, ts: float) -> Optional[AlertEvent]:
+        category = self.classify(xid)
+        severity = "critical" if category in ("memory_error", "fallen_off_bus", "gpu_reset_required") else \
+                   "warning"  if category in ("sdc_precursor", "compute_error") else "info"
+        if severity == "info":
+            return None
+
+        state = GPUState.CRITICAL if severity == "critical" else GPUState.DRIFTING
+        return AlertEvent(
+            gpu_index       = gpu,
+            timestamp       = ts,
+            state           = state,
+            prev_state      = GPUState.UNKNOWN,
+            rtheta          = None,
+            rtheta_baseline = None,
+            drift_sigma     = None,
+            confidence      = 0.90,
+            message         = (
+                f"[{severity.upper()}] GPU {gpu} — XID {xid} ({category}) "
+                f"appeared {count}× in the last 10 minutes. "
+                f"{'SDC precursor — schedule idle validation window.' if category == 'sdc_precursor' else ''}"
+                f"{'Memory hardware fault — consider draining.' if category == 'memory_error' else ''}"
+                f"{'GPU fallen off PCIe bus — immediate attention required.' if category == 'fallen_off_bus' else ''}"
+            ),
+            context = {
+                "severity": severity,
+                "xid":      xid,
+                "xid_category": category,
+                "xid_count": count,
+            },
+        )
+
+
 class MicroThrottleDetector:
     """
     Detects sustained SM clock suppression under active load.

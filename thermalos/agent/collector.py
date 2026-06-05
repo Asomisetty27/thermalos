@@ -84,6 +84,7 @@ class NVMLCollector:
 
     def _collect_one(self, idx: int, handle) -> RawSample:
         """Synchronous — called via asyncio.to_thread()."""
+        t0     = time.time()
         temp   = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         power  = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
         util   = pynvml.nvmlDeviceGetUtilizationRates(handle)
@@ -141,6 +142,7 @@ class NVMLCollector:
             ecc_dbit         = int(ecc_dbit),
             throttle_reasons = int(throttle_reasons),
             sm_clock_max_mhz = sm_clock_max_mhz,
+            poll_latency_s   = time.time() - t0,
         )
 
     def _collect_demo(self, idx: int) -> RawSample:
