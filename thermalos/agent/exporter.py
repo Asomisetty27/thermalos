@@ -79,6 +79,38 @@ class PrometheusExporter:
                                    "R_theta rolling window std dev (C/W)",
                                    ["gpu_index"])
 
+        # Silicon-level health
+        self.g_ecc_sbit   = Gauge("thermalos_gpu_ecc_sbit_total",
+                                   "Single-bit ECC errors (volatile, correctable)",
+                                   ["gpu_index"])
+        self.g_ecc_dbit   = Gauge("thermalos_gpu_ecc_dbit_total",
+                                   "Double-bit ECC errors (volatile, uncorrectable)",
+                                   ["gpu_index"])
+        self.g_clock_eff  = Gauge("thermalos_gpu_clock_efficiency_ratio",
+                                   "SM clock / max boost clock ratio (1.0 = no throttle)",
+                                   ["gpu_index"])
+
+        # Predictive risk
+        self.g_risk       = Gauge("thermalos_gpu_degradation_risk",
+                                   "Physics-informed degradation risk score 0-1",
+                                   ["gpu_index"])
+
+        # SDC detection
+        self.c_sdc        = Counter("thermalos_sdc_events_total",
+                                    "Silent data corruption events detected",
+                                    ["gpu_index"])
+        self.g_sdc_checks = Gauge("thermalos_sdc_last_check_timestamp",
+                                   "Unix timestamp of last SDC validation check",
+                                   ["gpu_index"])
+
+        # Redfish / chassis
+        self.g_inlet_temp = Gauge("thermalos_chassis_inlet_temp_celsius",
+                                   "Chassis inlet air temperature (°C)")
+        self.g_fan_min    = Gauge("thermalos_chassis_fan_rpm_min",
+                                   "Minimum fan RPM across all chassis fans")
+        self.g_psu_watts  = Gauge("thermalos_chassis_psu_input_watts",
+                                   "Total PSU input power draw (W)")
+
         # Counters
         self.c_alerts     = Counter("thermalos_gpu_alerts_total",
                                     "Total alerts emitted",
@@ -131,6 +163,35 @@ class PrometheusExporter:
             label = STATE_LABELS.get(s, s.name)
             self.g_state.labels(idx, label).set(1 if s == state else 0)
 
+    def update_silicon(self, gpu_index: int, ecc_sbit: int, ecc_dbit: int, clock_eff: Optional[float]) -> None:
+        if not PROMETHEUS_AVAILABLE:
+            return
+        idx = str(gpu_index)
+        self.g_ecc_sbit.labels(idx).set(ecc_sbit)
+        self.g_ecc_dbit.labels(idx).set(ecc_dbit)
+        if clock_eff is not None:
+            self.g_clock_eff.labels(idx).set(clock_eff)
+
+    def update_risk(self, gpu_index: int, risk_score: float) -> None:
+        if not PROMETHEUS_AVAILABLE:
+            return
+        self.g_risk.labels(str(gpu_index)).set(risk_score)
+
+    def record_sdc_event(self, gpu_index: int) -> None:
+        if not PROMETHEUS_AVAILABLE:
+            return
+        self.c_sdc.labels(str(gpu_index)).inc()
+
+    def update_redfish(self, inlet_temp: Optional[float], fan_rpm_min: Optional[int], psu_watts: Optional[float]) -> None:
+        if not PROMETHEUS_AVAILABLE:
+            return
+        if inlet_temp is not None:
+            self.g_inlet_temp.set(inlet_temp)
+        if fan_rpm_min is not None:
+            self.g_fan_min.set(fan_rpm_min)
+        if psu_watts is not None:
+            self.g_psu_watts.set(psu_watts)
+
     def record_alert(self, event: AlertEvent) -> None:
         if not PROMETHEUS_AVAILABLE:
             return
@@ -138,3 +199,5 @@ class PrometheusExporter:
         severity = ctx.get("severity", "info") if isinstance(ctx, dict) else "info"
         state    = STATE_LABELS.get(event.state, event.state.name)
         self.c_alerts.labels(str(event.gpu_index), severity, state).inc()
+        if isinstance(ctx, dict) and ctx.get("sdc_detected"):
+            self.c_sdc.labels(str(event.gpu_index)).inc()

@@ -35,8 +35,11 @@ from .correlator import FleetCorrelator
 from .silicon         import EccMonitor, MicroThrottleDetector
 from .unsupervised    import IsolationForestCritic
 from .dcgm_collector  import DCGMEnricher
-from .telemetry       import TelemetryReporter
-from .alerter         import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
+from .telemetry          import TelemetryReporter
+from .predictor          import FailurePredictor
+from .sdc_hunter         import SDCHunter
+from .redfish_collector  import RedfishEnricher
+from .alerter            import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
 from .exporter   import PrometheusExporter
 
 log = structlog.get_logger(__name__)
@@ -71,6 +74,12 @@ class AgentConfig:
     # Optional DCGM enrichment (requires nv-hostengine running on the host)
     use_dcgm:           bool  = False
 
+    # Optional Redfish/BMC out-of-band telemetry
+    use_redfish:        bool  = False
+    redfish_host:       Optional[str]  = None
+    redfish_user:       Optional[str]  = None
+    redfish_password:   Optional[str]  = None
+
     # ThermalOS Intelligence Network — anonymized telemetry opt-in
     data_sharing:       bool  = False
 
@@ -99,8 +108,18 @@ class ThermalOSAgent:
         self._micro_throttle = MicroThrottleDetector()
         self._critic         = IsolationForestCritic()
         self._dcgm           = DCGMEnricher() if config.use_dcgm else None
+        self._predictor      = FailurePredictor()
+        self._sdc_hunter     = SDCHunter(config.gpu_indices)
+        self._redfish        = (
+            RedfishEnricher(config.redfish_host, config.redfish_user, config.redfish_password)
+            if config.use_redfish and config.redfish_host else None
+        )
         self._telemetry      = TelemetryReporter(opt_in=config.data_sharing)
         self._router         = self._build_router()
+
+        # Per-GPU live state for SDC hunter cross-GPU validation
+        self._gpu_util:  dict[int, float] = {}
+        self._gpu_power: dict[int, float] = {}
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
         self._tick_count  = 0
@@ -120,6 +139,10 @@ class ThermalOSAgent:
         """Process one GPU sample through the full pipeline."""
         gpu = raw_sample.gpu_index
         ts  = raw_sample.timestamp
+
+        # Track live GPU state for SDC hunter
+        self._gpu_util[gpu]  = raw_sample.util_pct
+        self._gpu_power[gpu] = raw_sample.power_w
 
         # 0a. DCGM enrichment — fills NVLink/PCIe/engine fields if nv-hostengine available
         if self._dcgm is not None:
@@ -168,6 +191,11 @@ class ThermalOSAgent:
             confidence   = confidence,
             rtheta_mean  = window.rtheta_mean,
         )
+
+        # Update silicon metrics in exporter
+        sm_max = raw_sample.sm_clock_max_mhz
+        clock_eff = (raw_sample.clock_sm_mhz / sm_max) if sm_max > 0 else None
+        self._exporter.update_silicon(gpu, raw_sample.ecc_sbit, raw_sample.ecc_dbit, clock_eff)
 
         # 5. Drift detection + unsupervised critic
         drift = self._detector.update(gpu, ts, window.rtheta_mean, state)
@@ -229,7 +257,25 @@ class ThermalOSAgent:
             await self._router.route(pred_alert)
             log.info("predictive_warning", gpu=gpu, eta_min=eta_min, slope=drift.trend_slope)
 
-        # 8. Telemetry — record window for Intelligence Network (if opted in)
+        # 8a. Failure predictor — update and check for degradation risk alert
+        self._predictor.update(
+            gpu_index  = gpu,
+            ts         = ts,
+            rtheta     = window.rtheta_mean if window.is_stable else None,
+            drift      = drift,
+            ecc_sbit   = raw_sample.ecc_sbit,
+            ecc_dbit   = raw_sample.ecc_dbit,
+            clock_eff  = clock_eff,
+        )
+        risk_alert = self._predictor.maybe_alert(gpu, ts, state)
+        if risk_alert is not None:
+            self._alert_count += 1
+            self._exporter.record_alert(risk_alert)
+            await self._router.route(risk_alert)
+            log.info("degradation_risk_alert", gpu=gpu, score=risk_alert.context.get("degradation_risk"))
+        self._exporter.update_risk(gpu, self._predictor.get_score(gpu))
+
+        # 8b. Telemetry — record window for Intelligence Network (if opted in)
         gpu_name = getattr(raw_sample, 'gpu_name', '') if hasattr(raw_sample, 'gpu_name') else ''
         sm_max = getattr(raw_sample, 'sm_clock_max_mhz', 0)
         clock_eff = (raw_sample.clock_sm_mhz / sm_max) if sm_max > 0 else None
@@ -264,6 +310,12 @@ class ThermalOSAgent:
         if self.config.enable_prometheus:
             self._exporter.start_server()
 
+        # Probe Redfish BMC once at startup
+        if self._redfish:
+            await self._redfish.probe()
+            if self._redfish.available:
+                log.info("redfish_connected", host=self.config.redfish_host)
+
         collector_config = CollectorConfig(
             interval_sec = self.config.interval_sec,
             gpu_indices  = self.config.gpu_indices,
@@ -283,12 +335,47 @@ class ThermalOSAgent:
                 try:
                     await self._process_sample(raw_sample)
                     self._tick_count += 1
+
+                    # SDC hunter — runs once all GPU states are up-to-date
+                    # Only triggers on idle GPUs, rate-limited internally
+                    if self._tick_count % 10 == 0:
+                        gpu_states = {g: r.current_state for g, r in self._statemachine.all_states().items()}
+                        sdc_alerts = await self._sdc_hunter.hunt(
+                            gpu_states  = gpu_states,
+                            gpu_util    = self._gpu_util,
+                            gpu_power   = self._gpu_power,
+                            timestamp   = raw_sample.timestamp,
+                        )
+                        for sdc_alert in sdc_alerts:
+                            self._alert_count += 1
+                            self._exporter.record_alert(sdc_alert)
+                            await self._router.route(sdc_alert)
+
+                    # Redfish chassis poll — every 60 ticks (~5 min)
+                    if self._redfish and self._tick_count % 60 == 0:
+                        chassis = await self._redfish.collect()
+                        if chassis:
+                            fan_min = min(chassis.fan_rpms) if chassis.fan_rpms else None
+                            self._exporter.update_redfish(
+                                inlet_temp = chassis.inlet_temp_c,
+                                fan_rpm_min= fan_min,
+                                psu_watts  = chassis.psu_input_w,
+                            )
+                            # Cross-layer correlation: is R_theta drift caused by cooling?
+                            for g, rec in self._statemachine.all_states().items():
+                                if rec.current_state in (GPUState.DRIFTING, GPUState.CRITICAL):
+                                    root_cause = self._redfish.correlate_alert(chassis, True)
+                                    if root_cause:
+                                        log.warning("redfish_correlation gpu=%d cause=%s", g, root_cause)
+
                 except Exception as e:
                     log.error("pipeline_error", exc_info=e)
 
         await self._router.close()
         if self._dcgm:
             self._dcgm.shutdown()
+        if self._redfish:
+            self._redfish._available = False
         log.info("agent_stopped", ticks=self._tick_count, alerts=self._alert_count)
 
     def status(self) -> dict:
