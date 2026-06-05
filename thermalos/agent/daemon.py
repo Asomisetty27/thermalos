@@ -32,10 +32,11 @@ from .classifier import StateClassifier
 from .detector   import DriftDetector, DriftResult
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
-from .silicon       import EccMonitor, MicroThrottleDetector
-from .unsupervised  import IsolationForestCritic
-from .dcgm_collector import DCGMEnricher
-from .alerter       import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
+from .silicon         import EccMonitor, MicroThrottleDetector
+from .unsupervised    import IsolationForestCritic
+from .dcgm_collector  import DCGMEnricher
+from .telemetry       import TelemetryReporter
+from .alerter         import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
 from .exporter   import PrometheusExporter
 
 log = structlog.get_logger(__name__)
@@ -70,6 +71,9 @@ class AgentConfig:
     # Optional DCGM enrichment (requires nv-hostengine running on the host)
     use_dcgm:           bool  = False
 
+    # ThermalOS Intelligence Network — anonymized telemetry opt-in
+    data_sharing:       bool  = False
+
 
 class ThermalOSAgent:
     """
@@ -95,6 +99,7 @@ class ThermalOSAgent:
         self._micro_throttle = MicroThrottleDetector()
         self._critic         = IsolationForestCritic()
         self._dcgm           = DCGMEnricher() if config.use_dcgm else None
+        self._telemetry      = TelemetryReporter(opt_in=config.data_sharing)
         self._router         = self._build_router()
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
@@ -224,7 +229,21 @@ class ThermalOSAgent:
             await self._router.route(pred_alert)
             log.info("predictive_warning", gpu=gpu, eta_min=eta_min, slope=drift.trend_slope)
 
-        # 8. Fleet correlation — detect cross-GPU anomalies after each sample
+        # 8. Telemetry — record window for Intelligence Network (if opted in)
+        gpu_name = getattr(raw_sample, 'gpu_name', '') if hasattr(raw_sample, 'gpu_name') else ''
+        sm_max = getattr(raw_sample, 'sm_clock_max_mhz', 0)
+        clock_eff = (raw_sample.clock_sm_mhz / sm_max) if sm_max > 0 else None
+        self._telemetry.record_window(
+            gpu_name       = gpu_name,
+            rtheta_mean    = enriched.rtheta,
+            rtheta_std     = window.rtheta_std if window.is_stable else None,
+            ecc_sbit_rate  = float(raw_sample.ecc_sbit),
+            ecc_dbit_event = raw_sample.ecc_dbit > 0,
+            clock_eff_mean = clock_eff,
+        )
+        await self._telemetry.maybe_flush()
+
+        # 9. Fleet correlation — detect cross-GPU anomalies after each sample
         fleet_alert = self._correlator.check(
             {g: r.current_state for g, r in self._statemachine.all_states().items()},
             ts,

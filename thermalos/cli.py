@@ -108,6 +108,7 @@ def monitor(
         prefer_dt         = dt,
         k_warn            = sigma_warn,
         k_critical        = sigma_crit,
+        data_sharing      = saved.get("data_sharing", False),
     )
 
     # rebind so the banner below uses resolved values

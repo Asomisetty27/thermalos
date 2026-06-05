@@ -528,8 +528,47 @@ def step_alerts() -> dict:
 
 
 # ── Step 7: Save config + launch ───────────────────────────────────────────────
-def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: dict) -> None:
-    step_header(6, 6, "All set", "Config saved — ready to monitor")
+def step_intelligence_network() -> bool:
+    """Step 6: ThermalOS Intelligence Network opt-in consent."""
+    step_header(6, 7, "ThermalOS Intelligence Network", "Help make every deployment smarter")
+
+    console.print(Panel(
+        f"  [bold {TEXT}]The more GPUs ThermalOS monitors, the smarter it gets.[/]\n\n"
+        f"  Opt in to share anonymized GPU health signatures with the ThermalOS\n"
+        f"  Intelligence Network. In return, you get:\n\n"
+        f"  [bold {GREEN}]→[/]  Community benchmarks — where does your GPU sit vs the fleet P50/P95?\n"
+        f"  [bold {GREEN}]→[/]  Improved predictive models trained on real-world degradation curves\n"
+        f"  [bold {GREEN}]→[/]  Earlier failure detection as the network grows\n\n"
+        f"  [bold {TEXT}]What is shared (anonymized, aggregated hourly):[/]\n"
+        f"  [dim]R_theta statistics · ECC error rates · clock efficiency ratios\n"
+        f"  XID event frequencies · GPU generation tag · recovery time signatures[/]\n\n"
+        f"  [bold {TEXT}]What is NEVER shared:[/]\n"
+        f"  [dim]IP address · hostname · job names · usernames · model weights\n"
+        f"  company name · raw timestamps (hourly buckets only)[/]\n\n"
+        f"  [dim]Change anytime: edit data_sharing in {CONFIG_PATH}[/]",
+        title=f"[bold {BLUE}]Intelligence Network[/]",
+        title_align="left",
+        border_style=BLUE,
+        padding=(1, 2),
+    ))
+    console.print()
+
+    opt_in = Confirm.ask(
+        f"  [{TEXT}]Share anonymized telemetry with the ThermalOS Intelligence Network?[/]",
+        default=True,
+    )
+
+    if opt_in:
+        ok("Opted in — you'll receive community benchmarks in future releases")
+    else:
+        console.print(f"  [{DIM}]Opted out — you can enable this later in {CONFIG_PATH}[/]")
+
+    console.print()
+    return opt_in
+
+
+def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: dict, opt_in_telemetry: bool = False) -> None:
+    step_header(7, 7, "All set", "Config saved — ready to monitor")
 
     config = {
         "version":        __version__,
@@ -543,6 +582,7 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
         "prefer_dt":      True,
         "k_warn":         2.0,
         "k_critical":     3.5,
+        "data_sharing":   opt_in_telemetry,
     }
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -629,7 +669,8 @@ def run_wizard() -> None:
         baselines = step_baseline(gpus)
         step_first_reading(gpus, baselines)
         alert_cfg = step_alerts()
-        step_finish(sys_info, gpus, baselines, alert_cfg)
+        opt_in_telemetry = step_intelligence_network()
+        step_finish(sys_info, gpus, baselines, alert_cfg, opt_in_telemetry)
     except KeyboardInterrupt:
         console.print(f"\n\n  [{DIM}]Setup cancelled. Run [bold]thermalos setup[/] to start again.[/]\n")
         sys.exit(0)
