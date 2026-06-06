@@ -26,28 +26,38 @@ BUNDLE_DIR = Path(__file__).parent.parent / "models" / "bundle"
 NB_MODEL_PATH = BUNDLE_DIR / "nb_steady_state.pkl"
 DT_MODEL_PATH = BUNDLE_DIR / "dt_steady_state.pkl"
 
+# T4 defaults — overridden per-GPU when calibration is present
+_T4_LOAD_THRESHOLD = 0.87
+_T4_IDLE_THRESHOLD = 1.50
+
 
 # ── Hard-coded fallback rules from Orange DT analysis ─────────────────────
 # Decision Tree (depth ≤ 5, 100% accuracy on steady-state data):
 #
-#   IF R_theta ≤ 0.87:
-#     → under_load  (conf=1.00, n=963)
+#   IF R_theta ≤ load_threshold:
+#     → under_load
 #   ELSE IF P-state = P0:
-#     → zombie_recovery  (conf=1.00, n=584)
+#     → zombie_recovery
 #   ELSE (P-state ≥ P1):
-#     IF R_theta ≤ 1.50:
+#     IF R_theta ≤ idle_threshold:
 #       IF power ≤ 12.83W → child_exit_recovery OR clean_idle (power < 10.06W → clean_idle)
-#     ELSE (R_theta > 1.50):
-#       → child_exit_recovery  (conf=1.00, n=696)
+#     ELSE (R_theta > idle_threshold):
+#       → child_exit_recovery
 
-def _rule_classify(rtheta: float, power: float, pstate: int) -> tuple[GPUState, float]:
-    """Hard-coded decision tree rules. Used as fallback when pkl not available."""
-    if rtheta <= 0.87:
+def _rule_classify(
+    rtheta: float,
+    power: float,
+    pstate: int,
+    load_threshold: float = _T4_LOAD_THRESHOLD,
+    idle_threshold: float = _T4_IDLE_THRESHOLD,
+) -> tuple[GPUState, float]:
+    """Decision tree rules with optional calibrated thresholds."""
+    if rtheta <= load_threshold:
         return GPUState.UNDER_LOAD, 0.99
     if pstate == 0:
         return GPUState.ZOMBIE_RECOVERY, 1.00
-    # pstate ≥ 1 (P8 in practice for non-load states)
-    if rtheta <= 1.50:
+    # pstate ≥ 1
+    if rtheta <= idle_threshold:
         if power <= 12.83:
             if power <= 10.06:
                 return GPUState.CLEAN_IDLE, 1.00
@@ -65,14 +75,20 @@ class StateClassifier:
     conflict — useful signal for distribution shift (new GPU hardware, updated
     firmware, workload patterns not in Stage 1 training data).
 
-    Priority: ensemble (NB + DT) → single DT → single NB → hard-coded rules.
+    When a CalibrationManager is provided and calibration exists for a GPU,
+    the classifier always falls back to calibrated rule-based classification
+    rather than using the T4-trained ML models (which would misclassify on
+    hardware with different R_theta ranges).
+
+    Priority: calibrated-rules (when cal present) → ensemble → single DT → single NB → T4 rules.
     """
 
-    def __init__(self, prefer_interpretable: bool = True):
-        self._prefer_dt  = prefer_interpretable
-        self._nb_model   = None
-        self._dt_model   = None
-        self._mode       = "rules"
+    def __init__(self, prefer_interpretable: bool = True, calibration=None):
+        self._prefer_dt    = prefer_interpretable
+        self._nb_model     = None
+        self._dt_model     = None
+        self._mode         = "rules"
+        self._calibration  = calibration  # Optional[CalibrationManager]
         self._load_models()
 
     def _load_models(self) -> None:
@@ -102,10 +118,25 @@ class StateClassifier:
         Returns (state, confidence) from a steady-state window.
         Only call when window.is_stable == True.
 
-        In ensemble mode: both models vote. Agreement boosts confidence by 5%
-        (capped at 1.0). Disagreement uses the DT prediction but caps
-        confidence at 0.65, signalling uncertainty to the caller.
+        When calibration is present for this GPU, calibrated rules are used
+        and ML models are bypassed — the T4-trained models are not reliable
+        on hardware with a different R_theta range.
+
+        In ensemble mode (no calibration): both models vote. Agreement boosts
+        confidence by 5% (capped at 1.0). Disagreement caps confidence at 0.65.
         """
+        # Calibrated path — always rule-based with hardware-specific thresholds
+        if self._calibration is not None:
+            cal = self._calibration.get(window.gpu_index)
+            if cal is not None:
+                return _rule_classify(
+                    window.rtheta_mean,
+                    window.last_power,
+                    window.last_pstate,
+                    load_threshold=cal.load_threshold,
+                    idle_threshold=cal.idle_threshold,
+                )
+
         X = np.array([[
             window.rtheta_mean,
             window.last_power,
@@ -151,7 +182,7 @@ class StateClassifier:
             conf  = float(proba[pred])
             return CLASS_INDEX_TO_STATE.get(pred, GPUState.UNKNOWN), conf
 
-        # Fallback: hard-coded DT rules derived from Orange analysis
+        # Fallback: T4 rules derived from Orange analysis
         return _rule_classify(window.rtheta_mean, window.last_power, window.last_pstate)
 
     @property

@@ -29,6 +29,7 @@ from .metrics    import EnrichedSample, GPUState, ClassifiedSample, AlertEvent, 
 from .baseline   import BaselineManager
 from .window     import SteadyStateWindow, SIGMA_STRICT
 from .classifier import StateClassifier
+from .calibrate  import CalibrationManager
 from .detector   import DriftDetector, DriftResult
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
@@ -41,6 +42,7 @@ from .sdc_hunter         import SDCHunter
 from .redfish_collector  import RedfishEnricher
 from .alerter            import AlertRouter, StdoutAlerter, WebhookAlerter, FileAlerter
 from .health_api         import HealthAPIServer
+from .fault_classifier   import FaultCurveClassifier, FaultCause
 from ..                  import __version__
 from .exporter   import PrometheusExporter
 
@@ -105,7 +107,11 @@ class ThermalOSAgent:
 
         self._baseline     = BaselineManager()
         self._window       = SteadyStateWindow(config.window_sec, config.sigma_threshold)
-        self._classifier   = StateClassifier(prefer_interpretable=config.prefer_dt)
+        self._calibration  = CalibrationManager()
+        self._classifier   = StateClassifier(
+            prefer_interpretable=config.prefer_dt,
+            calibration=self._calibration,
+        )
         self._detector     = DriftDetector(config.k_warn, config.k_critical)
         self._statemachine   = GPUStateMachine()
         self._correlator     = FleetCorrelator()
@@ -116,6 +122,7 @@ class ThermalOSAgent:
         self._xid_parser     = XIDParser()
         self._predictor      = FailurePredictor()
         self._sdc_hunter     = SDCHunter(config.gpu_indices)
+        self._fault_classifier = FaultCurveClassifier()
 
         # Poll latency tracking — rolling mean per GPU (for health API + observability)
         self._poll_latency_ema: dict[int, float] = {}
@@ -283,6 +290,56 @@ class ThermalOSAgent:
             await self._router.route(critic_alert)
         self._exporter.update_drift(drift)
         self._exporter.update_state(gpu, state)
+
+        # 5b. Fault curve classifier — R_theta curve shape analysis (dust/TIM/fan/blockage)
+        fault = self._fault_classifier.update(
+            gpu_index = gpu,
+            ts        = ts,
+            rtheta    = window.rtheta_mean,
+            power_w   = raw_sample.power_w,
+            mem_util  = raw_sample.mem_util_pct,
+            fan_pct   = raw_sample.fan_speed_pct,
+        )
+        if fault is not None:
+            self._exporter.update_fault_diagnosis(fault)
+            if fault.cause not in (FaultCause.NOMINAL, FaultCause.INSUFFICIENT_DATA):
+                fault_alert = AlertEvent(
+                    gpu_index       = gpu,
+                    timestamp       = ts,
+                    state           = state,
+                    prev_state      = state,
+                    rtheta          = window.rtheta_mean,
+                    rtheta_baseline = drift.baseline_mean,
+                    drift_sigma     = drift.sigma_score,
+                    confidence      = fault.confidence,
+                    message         = (
+                        f"[FAULT] GPU {gpu} — {fault.cause.value.replace('_', ' ').upper()}. "
+                        f"{fault.remediation} "
+                        f"R_θ intercept={fault.intercept:.3f} C/W, gap={fault.gap:.3f} C/W "
+                        f"(confidence {fault.confidence:.0%})"
+                    ),
+                    context         = {
+                        "severity":    "warning",
+                        "fault_cause": fault.cause.value,
+                        "confidence":  fault.confidence,
+                        "intercept":   fault.intercept,
+                        "gap":         fault.gap,
+                        "curve_slope": fault.curve_slope,
+                        "drift_rate":  fault.drift_rate,
+                        "gap_trend":   fault.gap_trend,
+                        "remediation": fault.remediation,
+                        **fault.evidence,
+                    },
+                )
+                self._alert_count += 1
+                self._exporter.record_alert(fault_alert)
+                await self._router.route(fault_alert)
+                log.info("fault_classified",
+                         gpu=gpu,
+                         cause=fault.cause.value,
+                         confidence=fault.confidence,
+                         intercept=fault.intercept,
+                         gap=fault.gap)
 
         # 6. State machine → maybe alert
         alert = self._statemachine.transition(classified, drift)

@@ -5,6 +5,7 @@ Commands:
   setup       Interactive setup wizard (run this first)
   monitor     Run the monitoring agent (blocks)
   baseline    Run a baseline-only idle window scan
+  calibrate   Measure hardware-specific R_theta thresholds (run once on non-T4 GPUs)
   classify    Single-snapshot classify all GPUs
   serve       Run agent + Prometheus metrics server only
   train       Retrain bundled models from Stage 1 CSV
@@ -15,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -263,6 +265,151 @@ def _print_classify_table(windows, clf) -> None:
         )
 
     console.print(t)
+
+
+# ── calibrate ─────────────────────────────────────────────────────────────────
+
+@app.command()
+def calibrate(
+    gpu:          int   = typer.Option(0,     "--gpu",      "-g",  help="GPU index to calibrate"),
+    idle_wait:    float = typer.Option(120.0, "--idle-wait",       help="Max seconds to wait for stable idle"),
+    load_wait:    float = typer.Option(120.0, "--load-wait",       help="Max seconds to wait for stable load"),
+    skip_load:    bool  = typer.Option(False, "--skip-load",       help="Calibrate idle only (skip load phase)"),
+):
+    """
+    Measure hardware-specific R_theta thresholds and save to ~/.thermalos/calibration.json.
+
+    Run this once after setup on any GPU that is not a Tesla T4. The bundled
+    classifiers are trained on T4 Stage 1 data — they will misclassify on
+    hardware with a different thermal envelope (A100, H100, B200, etc.).
+
+    Two phases:
+      1. Idle phase   — waits for the GPU to reach stable idle automatically.
+      2. Load phase   — prompts you to start a workload, then locks the load R_theta.
+    """
+    import asyncio
+    from .agent.baseline import BaselineManager
+    from .agent.collector import NVMLCollector, CollectorConfig
+    from .agent.calibrate import (
+        CalibrationManager, CalibrationResult,
+        derive_thresholds, run_idle_phase, run_load_phase,
+    )
+
+    cal_mgr = CalibrationManager()
+    existing = cal_mgr.get(gpu)
+    if existing:
+        console.print(
+            f"[dim]Existing calibration for GPU {gpu}: "
+            f"load_threshold={existing.load_threshold} C/W  "
+            f"idle_threshold={existing.idle_threshold} C/W  "
+            f"age={existing.age_hours():.1f}h[/dim]"
+        )
+
+    # ── Get GPU name from NVML ────────────────────────────────────────────────
+    gpu_name = f"GPU {gpu}"
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        handle   = pynvml.nvmlDeviceGetHandleByIndex(gpu)
+        gpu_name = pynvml.nvmlDeviceGetName(handle).decode() if isinstance(
+            pynvml.nvmlDeviceGetName(handle), bytes
+        ) else pynvml.nvmlDeviceGetName(handle)
+        pynvml.nvmlShutdown()
+    except Exception:
+        pass
+
+    console.print(f"\n[bold]thermalos calibrate[/bold] — {gpu_name} (GPU {gpu})\n")
+
+    # ── Phase 1: Idle ─────────────────────────────────────────────────────────
+    console.print("[bold cyan]Phase 1 — Idle[/bold cyan]")
+    console.print(f"  Waiting up to {idle_wait:.0f}s for stable idle (util < 5%)…")
+    console.print("  [dim]Make sure no compute workloads are running.[/dim]\n")
+
+    bm = BaselineManager()
+
+    async def _idle():
+        cfg = CollectorConfig(interval_sec=2.0, gpu_indices=[gpu])
+        async with NVMLCollector(cfg) as c:
+            return await run_idle_phase(c, bm, max_wait_sec=idle_wait)
+
+    rtheta_idle = asyncio.run(_idle())
+
+    if rtheta_idle is None:
+        console.print(
+            "[red]✗[/red] Idle phase timed out. "
+            "Ensure the GPU is idle and retry, or run [bold]thermalos baseline --manual <T>[/bold] first."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]✓[/green] Idle R_θ locked: [bold]{rtheta_idle:.4f} C/W[/bold]\n")
+
+    # ── Phase 2: Load (optional) ──────────────────────────────────────────────
+    rtheta_load: Optional[float] = None
+
+    if not skip_load:
+        console.print("[bold cyan]Phase 2 — Load[/bold cyan]")
+        console.print("  Start a GPU compute workload now (training job, inference loop, stress test).")
+        console.print("  Press [bold]Enter[/bold] when the workload is running…", end=" ")
+        try:
+            input()
+        except EOFError:
+            pass
+
+        console.print(f"  Waiting up to {load_wait:.0f}s for stable load (util > 70%)…\n")
+
+        async def _load():
+            cfg = CollectorConfig(interval_sec=2.0, gpu_indices=[gpu])
+            async with NVMLCollector(cfg) as c:
+                return await run_load_phase(c, bm, max_wait_sec=load_wait)
+
+        rtheta_load = asyncio.run(_load())
+
+        if rtheta_load is None:
+            console.print(
+                "[yellow]⚠[/yellow] Load phase timed out — GPU utilization did not reach 70%. "
+                "Calibrating with idle phase only."
+            )
+        else:
+            console.print(f"[green]✓[/green] Load R_θ locked: [bold]{rtheta_load:.4f} C/W[/bold]\n")
+
+    # ── Derive thresholds + save ──────────────────────────────────────────────
+    load_threshold, idle_threshold = derive_thresholds(rtheta_idle, rtheta_load)
+    source = "observed_both" if rtheta_load is not None else "idle_only"
+
+    result = CalibrationResult(
+        gpu_index       = gpu,
+        gpu_name        = gpu_name,
+        rtheta_idle     = rtheta_idle,
+        rtheta_load     = rtheta_load,
+        load_threshold  = load_threshold,
+        idle_threshold  = idle_threshold,
+        calibrated_at   = time.time(),
+        source          = source,
+    )
+    cal_mgr.set(result)
+
+    # ── Summary table ─────────────────────────────────────────────────────────
+    from rich.table import Table
+    from rich import box
+
+    t = Table(box=box.SIMPLE_HEAVY, show_header=True)
+    t.add_column("Metric",    style="bold")
+    t.add_column("Value",     justify="right")
+    t.add_column("Notes")
+
+    t.add_row("GPU",              gpu_name,                         "")
+    t.add_row("R_θ idle",         f"{rtheta_idle:.4f} C/W",         "stable 20s window")
+    t.add_row("R_θ load",
+              f"{rtheta_load:.4f} C/W" if rtheta_load else "—",
+              "stable 20s window" if rtheta_load else "not observed")
+    t.add_row("load_threshold",   f"{load_threshold:.3f} C/W",      "R_θ ≤ this → under_load")
+    t.add_row("idle_threshold",   f"{idle_threshold:.3f} C/W",      "R_θ ≥ this → idle territory")
+    t.add_row("source",           source,                           "")
+    t.add_row("saved to",         str(CalibrationManager()._file),  "")
+
+    console.print(t)
+    console.print("\n[green]Calibration complete.[/green] "
+                  "Run [bold]thermalos monitor[/bold] to start using calibrated thresholds.")
 
 
 # ── train ─────────────────────────────────────────────────────────────────────
