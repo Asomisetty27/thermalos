@@ -26,7 +26,7 @@ A GPU at 82°C could be:
 ### pip (single node, free forever)
 
 ```bash
-pip install theta
+pip install runtheta
 theta setup        # interactive wizard — 90 seconds to first R_θ reading
 theta monitor      # start monitoring
 ```
