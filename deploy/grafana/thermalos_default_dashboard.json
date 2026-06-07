@@ -1,0 +1,269 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "ThermalOS default dashboard — 6 panels covering the essentials: R_theta, junction temp, GPU state, drift, ECC, predictive risk. Import via Dashboards → Import → Upload JSON.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "R_θ per GPU (C/W)",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_rtheta_cwatt",
+          "legendFormat": "GPU {{gpu_index}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 4,
+            "showPoints": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1.5},
+              {"color": "red", "value": 2.0}
+            ]
+          },
+          "decimals": 3
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi", "sort": "desc"},
+        "legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["mean", "lastNotNull", "max"]}
+      },
+      "description": "Effective thermal resistance — the headline ThermalOS metric. Sustained drift above the yellow threshold indicates cooling-path degradation."
+    },
+    {
+      "id": 2,
+      "title": "Junction Temperature (°C)",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_temperature_celsius",
+          "legendFormat": "GPU {{gpu_index}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 75},
+              {"color": "orange", "value": 85},
+              {"color": "red", "value": 90}
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["max", "mean", "lastNotNull"]}
+      }
+    },
+    {
+      "id": 3,
+      "title": "GPU State",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_state_info == 1",
+          "legendFormat": "GPU {{gpu_index}}: {{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"options": {"1": {"color": "green",  "text": "active"}}, "type": "value"}
+          ],
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Degradation Risk Score (predictor)",
+      "type": "gauge",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_degradation_risk",
+          "legendFormat": "GPU {{gpu_index}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green",  "value": null},
+              {"color": "yellow", "value": 0.50},
+              {"color": "orange", "value": 0.65},
+              {"color": "red",    "value": 0.80}
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto"
+      },
+      "description": "Physics-informed risk score 0–1. >0.65 → drain. >0.80 → evacuate. Combines R_θ slope, ECC rate, drift sigma, clock efficiency."
+    },
+    {
+      "id": 5,
+      "title": "Drift σ (deviation from baseline)",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_drift_sigma",
+          "legendFormat": "GPU {{gpu_index}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 5},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 2.0},
+              {"color": "red", "value": 3.5}
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {"mode": "multi"},
+        "legend": {"showLegend": true, "displayMode": "list", "placement": "bottom"}
+      }
+    },
+    {
+      "id": 6,
+      "title": "Alerts (last 24h)",
+      "type": "timeseries",
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 15},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum by (severity) (increase(thermalos_gpu_alerts_total[5m]))",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "stacking": {"mode": "normal"}},
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "critical"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+          {"matcher": {"id": "byName", "options": "warning"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "yellow"}}]},
+          {"matcher": {"id": "byName", "options": "info"},     "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]}
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "title": "ECC Errors (volatile)",
+      "type": "timeseries",
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 15},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "thermalos_gpu_ecc_sbit_total",
+          "legendFormat": "GPU {{gpu_index}} sbit (correctable)",
+          "refId": "A"
+        },
+        {
+          "expr": "thermalos_gpu_ecc_dbit_total",
+          "legendFormat": "GPU {{gpu_index}} dbit (UNCORRECTABLE)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2}
+        },
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*dbit.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}, {"id": "custom.lineWidth", "value": 3}]}
+        ]
+      },
+      "description": "Any nonzero dbit value = silicon damage. Notify Amogh immediately."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["thermalos", "gpu", "ai-factory", "noyce"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "America/Los_Angeles",
+  "title": "ThermalOS — Cal Poly Noyce AI Factory",
+  "uid": "thermalos-noyce-default",
+  "version": 1,
+  "weekStart": ""
+}

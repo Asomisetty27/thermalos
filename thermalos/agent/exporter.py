@@ -23,6 +23,7 @@ from typing import Optional
 from .metrics import AlertEvent, EnrichedSample, GPUState, STATE_LABELS
 from .window import WindowResult
 from .detector import DriftResult
+from .fault_classifier import FaultDiagnosis, FaultCause
 from .. import __version__
 
 log = logging.getLogger(__name__)
@@ -110,6 +111,17 @@ class PrometheusExporter:
                                    "Minimum fan RPM across all chassis fans")
         self.g_psu_watts  = Gauge("thermalos_chassis_psu_input_watts",
                                    "Total PSU input power draw (W)")
+
+        # Fault curve classifier
+        self.g_fault_cause    = Gauge("thermalos_gpu_fault_cause",
+                                      "Active fault cause (1 = active, 0 = inactive)",
+                                      ["gpu_index", "cause"])
+        self.g_curve_slope    = Gauge("thermalos_gpu_rtheta_curve_slope",
+                                      "R_theta physical slope (C/W per W)",
+                                      ["gpu_index"])
+        self.g_rtheta_intercept = Gauge("thermalos_gpu_rtheta_intercept_cwatt",
+                                        "R_theta at low-power tier — thermal stack intercept (C/W)",
+                                        ["gpu_index"])
 
         # Counters
         self.c_alerts     = Counter("thermalos_gpu_alerts_total",
@@ -201,3 +213,18 @@ class PrometheusExporter:
         self.c_alerts.labels(str(event.gpu_index), severity, state).inc()
         if isinstance(ctx, dict) and ctx.get("sdc_detected"):
             self.c_sdc.labels(str(event.gpu_index)).inc()
+
+    def update_fault_diagnosis(self, diagnosis: FaultDiagnosis) -> None:
+        if not PROMETHEUS_AVAILABLE:
+            return
+        idx = str(diagnosis.gpu_index)
+        for cause in FaultCause:
+            if cause in (FaultCause.INSUFFICIENT_DATA,):
+                continue
+            self.g_fault_cause.labels(idx, cause.value).set(
+                1 if diagnosis.cause == cause else 0
+            )
+        if diagnosis.curve_slope is not None:
+            self.g_curve_slope.labels(idx).set(diagnosis.curve_slope)
+        if diagnosis.intercept is not None:
+            self.g_rtheta_intercept.labels(idx).set(diagnosis.intercept)
