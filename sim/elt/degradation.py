@@ -107,6 +107,44 @@ def tim_degradation(duration_s: float, baseline_s: float = 600.0,
     return scn, DegradationSpec("tim", variant, severity, horizon)
 
 
+def tim_degradation_arrhenius(duration_s: float, baseline_s: float = 0.0,
+                              severity: float = 2.4, variant: str = "emergent",
+                              workload_w: float = P.LOAD_POWER_W
+                              ) -> tuple[Scenario, DegradationSpec]:
+    """
+    EMERGENT TIM dry-out: R_ct is not handed an externally-imposed schedule.
+    Instead a degradation-progress state x in [0,1] evolves under temperature-
+    activated Arrhenius kinetics (dx/dt = k(T_c)*(1-x), see
+    params.tim_arrhenius_rate / thermal_model._rct_kinetic), and
+    R_ct = R_ct0*(1 + (severity-1)*x).
+
+    This is the complementary counterpart to tim_degradation()'s controlled
+    ramp (the protocol's "begin controlled degradation ramp" procedure, which
+    is what the physical testbed will actually run). Running both and
+    comparing answers a genuinely open question: does the externally-imposed
+    ramp the protocol assumes resemble what real thermally-activated material
+    kinetics produce on their own — including the positive feedback (hotter
+    TIM -> faster degradation -> hotter still) a prescribed trajectory cannot
+    represent?
+
+    `baseline_s` and `variant` are accepted for interface uniformity with the
+    other MODE_BUILDERS entries (the Monte Carlo / trial harness calls every
+    builder the same way) but are NOT used to gate the physical process: the
+    kinetic dry-out is continuous from t=0 by construction — it is not
+    "switched on" by an operator, that is precisely what makes it emergent
+    rather than imposed. The detector's baseline-fitting window can still use
+    `baseline_s` (early in the run x~0, R_theta is near-healthy).
+    """
+    if variant != "emergent":
+        raise ValueError(f"tim_degradation_arrhenius has only one mode: 'emergent' (got {variant!r})")
+    scn = Scenario(
+        duration_s=duration_s, workload_power_w=workload_w,
+        tim_kinetic_severity=severity, baseline_s=baseline_s,
+        label=f"TIM-arrhenius-x{severity}",
+    )
+    return scn, DegradationSpec("tim_arrhenius", "emergent", severity, duration_s)
+
+
 def airflow_restriction(duration_s: float, baseline_s: float = 600.0,
                         severity: float = 0.45, variant: str = "gradual",
                         workload_w: float = P.LOAD_POWER_W) -> tuple[Scenario, DegradationSpec]:
@@ -158,13 +196,15 @@ def fan_reduction(duration_s: float, baseline_s: float = 600.0,
 # Registry for the CLI / Monte Carlo
 MODE_BUILDERS = {
     "tim": tim_degradation,
+    "tim_arrhenius": tim_degradation_arrhenius,
     "airflow": airflow_restriction,
     "fan": fan_reduction,
 }
 
 # Default timescales (s) — realistic onset per mode. Used by the CLI defaults.
 DEFAULT_HORIZON_S = {
-    "tim": 6 * 3600.0,      # 6 h dry-out
-    "airflow": 45 * 60.0,   # 45 min occlusion
-    "fan": 10 * 60.0,       # 10 min (step engages at baseline)
+    "tim": 6 * 3600.0,            # 6 h dry-out
+    "tim_arrhenius": 6 * 3600.0,  # same horizon — emergent counterpart to "tim"
+    "airflow": 45 * 60.0,         # 45 min occlusion
+    "fan": 10 * 60.0,             # 10 min (step engages at baseline)
 }

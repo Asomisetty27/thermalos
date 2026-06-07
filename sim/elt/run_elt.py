@@ -25,9 +25,10 @@ from . import validate as validate_mod
 
 # Default per-mode run geometry: (variant, duration_s, baseline_s)
 MODE_GEOMETRY = {
-    "tim":     ("gradual", deg.DEFAULT_HORIZON_S["tim"],     600.0),
-    "airflow": ("gradual", deg.DEFAULT_HORIZON_S["airflow"], 600.0),
-    "fan":     ("step",    deg.DEFAULT_HORIZON_S["fan"],     180.0),
+    "tim":           ("gradual",  deg.DEFAULT_HORIZON_S["tim"],           600.0),
+    "tim_arrhenius": ("emergent", deg.DEFAULT_HORIZON_S["tim_arrhenius"], 600.0),
+    "airflow":       ("gradual",  deg.DEFAULT_HORIZON_S["airflow"],       600.0),
+    "fan":           ("step",     deg.DEFAULT_HORIZON_S["fan"],           180.0),
 }
 
 
@@ -155,7 +156,7 @@ def main(argv=None) -> int:
     for name, fn in (("single", cmd_single), ("mc", cmd_mc)):
         sp = sub.add_parser(name)
         sp.add_argument("--mode", choices=list(MODE_GEOMETRY), default="tim")
-        sp.add_argument("--variant", choices=["gradual", "step"], default=None)
+        sp.add_argument("--variant", choices=["gradual", "step", "emergent"], default=None)
         sp.add_argument("--trials", type=int, default=50)
         sp.add_argument("--seed", type=int, default=1)
         sp.add_argument("--ambient", choices=["true", "virtual"], default="true")

@@ -117,7 +117,7 @@ def plot_leadtime_vs_k(mc_by_mode: dict, out_path: Path) -> Path:
     """Lead-time vs k tradeoff curve (median +/- IQR) per mode."""
     fig, ax = plt.subplots(figsize=(9, 5.5))
     fig.patch.set_facecolor(_BG)
-    colors = {"tim": _HEALTHY, "airflow": _CAUTION, "fan": _RISING}
+    colors = {"tim": _HEALTHY, "tim_arrhenius": _BP, "airflow": _CAUTION, "fan": _RISING}
 
     for mode, mc in mc_by_mode.items():
         ks = list(mc.k_values)

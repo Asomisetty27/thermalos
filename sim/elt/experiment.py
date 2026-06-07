@@ -60,16 +60,19 @@ def _build_scenario(mode: str, variant: str, duration_s: float, baseline_s: floa
                     rng: np.random.Generator, jitter: bool):
     builder = deg.MODE_BUILDERS[mode]
     # default severities per mode (chosen to cross throttle)
-    sev_default = {"tim": 2.4, "airflow": 0.45, "fan": 0.40}[mode]
+    sev_default = {"tim": 2.4, "tim_arrhenius": 2.4, "airflow": 0.45, "fan": 0.40}[mode]
     sev = sev_default
     if jitter:
         # jitter severity ~5%, keeping airflow/fan caps in (0,1)
-        if mode == "tim":
+        if mode in ("tim", "tim_arrhenius"):
             sev = sev_default * (1.0 + rng.normal(0.0, 0.06))
         else:
             sev = float(np.clip(sev_default * (1.0 + rng.normal(0.0, 0.06)), 0.05, 0.95))
+    # tim_arrhenius has only one variant ("emergent") — the trial harness's
+    # default 'gradual'/'step' selection doesn't apply to an emergent process.
+    eff_variant = "emergent" if mode == "tim_arrhenius" else variant
     scn, spec = builder(duration_s=duration_s, baseline_s=baseline_s,
-                        severity=sev, variant=variant)
+                        severity=sev, variant=eff_variant)
     return scn, spec
 
 
