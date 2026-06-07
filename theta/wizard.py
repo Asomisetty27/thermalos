@@ -248,6 +248,25 @@ def step_gpu_inventory(sys_info: dict) -> list[dict]:
     console.print(Panel(t, border_style=DIM, padding=(0, 1)))
     ok(f"{len(gpus)} GPU{'s' if len(gpus) != 1 else ''} ready for monitoring")
 
+    non_t4 = [g for g in gpus if "T4" not in g["name"]]
+    if non_t4:
+        models = ", ".join(sorted({g["name"].split("(")[0].strip() for g in non_t4}))
+        console.print(Panel(
+            f"  The bundled classifier was trained on Tesla T4 thermal data — its\n"
+            f"  R_θ thresholds (idle ≈ 1.28 C/W, load ≈ 0.72 C/W) reflect a small\n"
+            f"  air-cooled package and [bold]will misfire[/] on a different thermal\n"
+            f"  envelope like [bold]{models}[/].\n\n"
+            f"  After setup completes, run:\n"
+            f"  [bold {GREEN}]theta calibrate --gpu <index>[/]\n\n"
+            f"  [{DIM}]This measures YOUR hardware's actual idle/load R_θ and derives\n"
+            f"  thresholds from it — a few minutes, once per GPU model.[/]",
+            border_style=YELLOW,
+            title=f"[{YELLOW}]Non-T4 hardware detected — calibration recommended[/]",
+            title_align="left",
+            padding=(1, 2),
+        ))
+        console.print()
+
     return gpus
 
 
@@ -656,12 +675,20 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
     console.print()
 
     # Launch commands
+    non_t4 = [g for g in gpus if "T4" not in g["name"]]
+    calibrate_line = (
+        f"  [bold {YELLOW}]theta calibrate --gpu 0[/]   [dim]— measure YOUR hardware's R_θ "
+        f"(recommended — non-T4 detected)[/]\n"
+        if non_t4 else
+        f"  [dim]theta calibrate --gpu 0[/]  [dim]— measure hardware-specific R_θ thresholds[/]\n"
+    )
     console.print(Panel(
         f"  [bold {TEXT}]Start monitoring:[/]\n\n"
         f"  [bold {GREEN}]theta monitor[/]\n\n"
         f"  [dim]Other commands:[/]\n"
         f"  [dim]theta classify[/]           [dim]— snapshot all GPUs right now[/]\n"
         f"  [dim]theta baseline --gpu 0[/]   [dim]— re-lock virtual ambient[/]\n"
+        + calibrate_line +
         f"  [dim]theta serve[/]              [dim]— metrics only, no stdout[/]\n"
         f"  [dim]theta train /path/data.csv[/] [dim]— retrain from new data[/]\n\n"
         f"  [bold {BLUE}]Grafana dashboard:[/]  [dim]import theta_grafana.json (coming soon)[/]",
