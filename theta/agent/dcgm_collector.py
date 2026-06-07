@@ -63,8 +63,8 @@ class DCGMEnricher:
     def _try_init(self) -> None:
         try:
             import pydcgm
-            import dcgm_structs
-            import dcgm_fields
+            import dcgm_structs  # noqa: F401  (availability probe)
+            import dcgm_fields   # noqa: F401  (availability probe)
         except ImportError:
             log.info("pydcgm not installed — DCGM enrichment disabled")
             return
@@ -100,7 +100,6 @@ class DCGMEnricher:
         if not self._available:
             return {}
         try:
-            import dcgm_fields
             values = self._group.samples.GetLatest(self._field_group).values
             row = values.get(gpu_index, {})
 

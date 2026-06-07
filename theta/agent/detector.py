@@ -12,7 +12,6 @@ This is the "drift detection, not thresholds" capability (bento card 01).
 from __future__ import annotations
 
 import math
-import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional

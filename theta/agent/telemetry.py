@@ -25,12 +25,11 @@ API endpoint: https://api.runtheta.io/v1/telemetry  (TBD — Supabase edge fn)
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import time
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional
 
 log = logging.getLogger(__name__)

@@ -22,9 +22,8 @@ mean "we are fairly confident something is wrong," not "we saw one bad reading."
 from __future__ import annotations
 
 import math
-import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -117,7 +116,7 @@ class FailurePredictor:
         # ── ECC double-bit (immediate, high weight) ───────────────────────────
         dbit_any = any(r.ecc_dbit > 0 for r in records[-5:])
         if dbit_any:
-            contributions.append((W_ECC_DBIT, f"uncorrectable ECC errors in last 5 windows"))
+            contributions.append((W_ECC_DBIT, "uncorrectable ECC errors in last 5 windows"))
 
         # ── ECC single-bit rate ───────────────────────────────────────────────
         sbit_rates = np.array([r.ecc_sbit for r in records], dtype=float)

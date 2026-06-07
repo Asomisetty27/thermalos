@@ -10,13 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
-from .metrics import AlertEvent, GPUState, STATE_LABELS
+from .metrics import AlertEvent, STATE_LABELS
 from .. import __version__
 
 log = logging.getLogger(__name__)

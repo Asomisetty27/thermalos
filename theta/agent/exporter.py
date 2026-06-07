@@ -16,7 +16,6 @@ Follows OpenTelemetry + Prometheus naming conventions:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Optional
 
@@ -30,7 +29,7 @@ log = logging.getLogger(__name__)
 
 try:
     from prometheus_client import (
-        Counter, Gauge, Info, start_http_server, REGISTRY
+        Counter, Gauge, Info, start_http_server
     )
     PROMETHEUS_AVAILABLE = True
 except ImportError:

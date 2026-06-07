@@ -93,7 +93,8 @@ class RedfishEnricher:
         if not self._available:
             return None
 
-        import time, httpx
+        import time
+        import httpx
         sample = RedfishSample(timestamp=time.time())
 
         async with httpx.AsyncClient(verify=self._verify, timeout=8.0) as c:

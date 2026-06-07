@@ -16,21 +16,19 @@ One pipeline runs for ALL GPUs concurrently (gather).
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import structlog
 
 from .collector  import NVMLCollector, CollectorConfig
-from .metrics    import EnrichedSample, GPUState, ClassifiedSample, AlertEvent, enrich
+from .metrics    import GPUState, ClassifiedSample, AlertEvent, enrich
 from .baseline   import BaselineManager
 from .window     import SteadyStateWindow, SIGMA_STRICT
 from .classifier import StateClassifier
 from .calibrate  import CalibrationManager
-from .detector   import DriftDetector, DriftResult
+from .detector   import DriftDetector
 from .state      import GPUStateMachine
 from .correlator import FleetCorrelator
 from .silicon         import EccMonitor, MicroThrottleDetector, XIDParser
@@ -521,7 +519,6 @@ class ThetaAgent:
         """Snapshot of current agent state — used by CLI `theta status`."""
         states = {}
         for gpu_idx, rec in self._statemachine.all_states().items():
-            b = self._baseline.get_baseline(gpu_idx)
             states[gpu_idx] = {
                 "state":       rec.current_state.name,
                 "rtheta":      rec.last_rtheta,

@@ -14,12 +14,9 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 from rich.align import Align
-from rich.columns import Columns
 from rich.console import Console
-from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
     BarColumn, Progress, SpinnerColumn,
@@ -28,7 +25,6 @@ from rich.progress import (
 from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 from rich.table import Table
-from rich.text import Text
 from rich import box
 
 from . import __version__
@@ -388,7 +384,7 @@ def step_first_reading(gpus: list[dict], baselines: dict) -> None:
     from theta.agent.metrics     import enrich
     from theta.agent.window      import SteadyStateWindow
     from theta.agent.classifier  import StateClassifier
-    from theta.agent.metrics     import STATE_LABELS, GPUState
+    from theta.agent.metrics     import STATE_LABELS
     from theta.agent.baseline    import BaselineManager
 
     state_colors = {
@@ -464,6 +460,8 @@ def step_first_reading(gpus: list[dict], baselines: dict) -> None:
         t.add_column("v", style=TEXT,  min_width=24)
         t.add_row("R_θ",       f"[bold {GREEN}]{r['rtheta']:.4f} C/W[/]  [dim]σ={r['std']:.4f}[/]")
         t.add_row("State",     f"[bold {color}]{r['state']}[/]  [dim]conf={r['conf']:.2f}[/]")
+        if desc:
+            t.add_row("Means",  f"[dim]{desc}[/]")
         t.add_row("Power",     f"{r['power']:.1f}W  util={r['util']:.0f}%  P{r['pstate']}")
         t.add_row("Why",       f"[dim]{r['reason'][:64]}[/]")
 

@@ -8,8 +8,6 @@ This is the foundational Theta metric. No other tool computes it.
 
 from __future__ import annotations
 
-import math
-import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional

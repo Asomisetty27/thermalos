@@ -14,7 +14,6 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
 
 
 WINDOW_SEC_DEFAULT  = 15.0   # seconds of history required

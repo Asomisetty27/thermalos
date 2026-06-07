@@ -30,10 +30,8 @@ of the agent's import path.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import subprocess
 import sys
 import time
 import tempfile
