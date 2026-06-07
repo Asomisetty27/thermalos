@@ -1,5 +1,5 @@
 """
-ThermalOS setup wizard — thermalos setup
+Theta setup wizard — theta setup
 
 Interactive step-by-step onboarding. Detects GPUs, locks virtual ambient,
 runs first classification, configures alerts, saves config.
@@ -33,7 +33,7 @@ from rich import box
 
 from . import __version__
 
-CONFIG_PATH = Path.home() / ".thermalos" / "config.json"
+CONFIG_PATH = Path.home() / ".theta" / "config.json"
 console = Console()
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ def step_welcome() -> None:
     console.print()
     console.print(Align(
         Panel(
-            f"  [{TEXT}]ThermalOS computes [bold]R_θ = ΔT / P[/] in real time from your existing\n"
+            f"  [{TEXT}]Theta computes [bold]R_θ = ΔT / P[/] in real time from your existing\n"
             f"  DCGM telemetry. That ratio separates busy-hot GPUs from failing-hot ones —\n"
             f"  [bold {GREEN}]the only metric that does.[/]\n\n"
             f"  [{DIM}]This wizard takes ~90 seconds and leaves you fully configured.[/]  ",
@@ -112,7 +112,7 @@ def step_welcome() -> None:
         align="center",
     ))
     console.print()
-    Confirm.ask(f"  [{TEXT}]Ready to set up ThermalOS?[/]", default=True)
+    Confirm.ask(f"  [{TEXT}]Ready to set up Theta?[/]", default=True)
 
 
 # ── Step 2: System check ───────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ def step_system_check() -> dict:
     console.print()
     if results.get("demo"):
         console.print(Panel(
-            f"  [{YELLOW}]No NVIDIA GPU detected.[/] ThermalOS will run in [bold]demo mode[/] with\n"
+            f"  [{YELLOW}]No NVIDIA GPU detected.[/] Theta will run in [bold]demo mode[/] with\n"
             f"  synthetic telemetry. All features work — results are simulated.\n\n"
             f"  Install pynvml on a machine with an NVIDIA GPU for live monitoring:\n"
             f"  [bold {BLUE}]pip install nvidia-ml-py[/]",
@@ -260,7 +260,7 @@ def step_baseline(gpus: list[dict]) -> dict:
     step_header(3, 6, "Virtual ambient", "Estimating T_ref — no thermocouple needed")
 
     console.print(Panel(
-        f"  ThermalOS derives the ambient reference temperature [bold]T_ref[/] from your\n"
+        f"  Theta derives the ambient reference temperature [bold]T_ref[/] from your\n"
         f"  GPU's own stable idle windows — no external hardware required.\n\n"
         f"  [{DIM}]We wait for: util < 5%  ·  P-state ≥ P4  ·  stable for 30s (σ < 1.5°C)[/]",
         border_style=DIM,
@@ -269,7 +269,7 @@ def step_baseline(gpus: list[dict]) -> dict:
     console.print()
 
     # Check if baselines already exist
-    from thermalos.agent.baseline import BaselineManager
+    from theta.agent.baseline import BaselineManager
     bm = BaselineManager()
 
     existing = {g["index"]: bm.get_baseline(g["index"]) for g in gpus if bm.has_baseline(g["index"])}
@@ -326,7 +326,7 @@ def step_baseline(gpus: list[dict]) -> dict:
             info("Using default T_ref = 25.0°C (demo mode). Override with 'manual' next time.")
             console.print()
             baselines = {g["index"]: 25.0 for g in gpus}
-            from thermalos.agent.baseline import BaselineManager
+            from theta.agent.baseline import BaselineManager
             bm_demo = BaselineManager()
             for g in gpus:
                 bm_demo.set_manual(g["index"], 25.0)
@@ -337,7 +337,7 @@ def step_baseline(gpus: list[dict]) -> dict:
         console.print()
 
         async def _auto_baseline():
-            from thermalos.agent.collector import NVMLCollector, CollectorConfig
+            from theta.agent.collector import NVMLCollector, CollectorConfig
             cfg = CollectorConfig(interval_sec=2.0)
             async with NVMLCollector(cfg) as c:
                 with Progress(
@@ -384,12 +384,12 @@ def step_first_reading(gpus: list[dict], baselines: dict) -> None:
         f"  [{DIM}](This is what the agent does every 5 seconds, continuously.)[/]\n"
     )
 
-    from thermalos.agent.collector   import NVMLCollector, CollectorConfig
-    from thermalos.agent.metrics     import enrich
-    from thermalos.agent.window      import SteadyStateWindow
-    from thermalos.agent.classifier  import StateClassifier
-    from thermalos.agent.metrics     import STATE_LABELS, GPUState
-    from thermalos.agent.baseline    import BaselineManager
+    from theta.agent.collector   import NVMLCollector, CollectorConfig
+    from theta.agent.metrics     import enrich
+    from theta.agent.window      import SteadyStateWindow
+    from theta.agent.classifier  import StateClassifier
+    from theta.agent.metrics     import STATE_LABELS, GPUState
+    from theta.agent.baseline    import BaselineManager
 
     state_colors = {
         "under_load":          GREEN,
@@ -490,7 +490,7 @@ def step_redfish() -> dict:
         f"  inlet air temperature, fan RPM, PSU health, NVLink fabric status.\n\n"
         f"  [{GREEN}]Cross-layer correlation example:[/]\n"
         f"  [{DIM}]GPU R_θ drifting + fan at 60% RPM → root cause is cooling path,[/]\n"
-        f"  [{DIM}]not silicon degradation. ThermalOS identifies this automatically.[/]\n\n"
+        f"  [{DIM}]not silicon degradation. Theta identifies this automatically.[/]\n\n"
         f"  [{DIM}]Skip this on Colab, consumer GPUs, or any non-DGX host.[/]",
         title=f"[{BLUE}]Redfish / BMC (optional)[/]",
         title_align="left",
@@ -522,7 +522,7 @@ def step_alerts() -> dict:
     step_header(5, 7, "Alert setup", "Configure how you want to be notified")
 
     console.print(Panel(
-        f"  ThermalOS can alert you when a GPU transitions to an anomalous state.\n"
+        f"  Theta can alert you when a GPU transitions to an anomalous state.\n"
         f"  Every alert includes: state, R_θ, σ-score, last 10 samples, and the reason.\n\n"
         f"  [{DIM}]Alert types: [bold]zombie_recovery[/] (CUDA stuck) · "
         f"[bold]drifting[/] (cooling path degrading) · [bold]critical[/] (3.5σ above baseline)[/]",
@@ -546,7 +546,7 @@ def step_alerts() -> dict:
     # Log file
     want_log = Confirm.ask(f"\n  [{TEXT}]Log alerts to a JSONL file?[/]", default=True)
     if want_log:
-        default_log = str(Path.home() / ".thermalos" / "alerts.jsonl")
+        default_log = str(Path.home() / ".theta" / "alerts.jsonl")
         log_path    = Prompt.ask(f"  [{TEXT}]Log file path[/]", default=default_log)
         alert_cfg["alert_log_path"] = log_path
         ok(f"Alert log: {log_path}")
@@ -559,20 +559,20 @@ def step_alerts() -> dict:
     alert_cfg["prometheus"] = want_prom
     alert_cfg["prometheus_port"] = 9101
     if want_prom:
-        ok("Prometheus export on :9101  ·  thermalos_gpu_rtheta_cwatt, thermalos_gpu_state_info, …")
-        info("Add to prometheus.yml:  - job_name: thermalos  static_configs: [{targets: ['localhost:9101']}]")
+        ok("Prometheus export on :9101  ·  theta_gpu_rtheta_cwatt, theta_gpu_state_info, …")
+        info("Add to prometheus.yml:  - job_name: theta  static_configs: [{targets: ['localhost:9101']}]")
 
     return alert_cfg
 
 
 # ── Step 7: Save config + launch ───────────────────────────────────────────────
 def step_intelligence_network() -> bool:
-    """Step 6: ThermalOS Intelligence Network opt-in consent."""
-    step_header(6, 7, "ThermalOS Intelligence Network", "Help make every deployment smarter")
+    """Step 6: Theta Intelligence Network opt-in consent."""
+    step_header(6, 7, "Theta Intelligence Network", "Help make every deployment smarter")
 
     console.print(Panel(
-        f"  [bold {TEXT}]The more GPUs ThermalOS monitors, the smarter it gets.[/]\n\n"
-        f"  Opt in to share anonymized GPU health signatures with the ThermalOS\n"
+        f"  [bold {TEXT}]The more GPUs Theta monitors, the smarter it gets.[/]\n\n"
+        f"  Opt in to share anonymized GPU health signatures with the Theta\n"
         f"  Intelligence Network. In return, you get:\n\n"
         f"  [bold {GREEN}]→[/]  Community benchmarks — where does your GPU sit vs the fleet P50/P95?\n"
         f"  [bold {GREEN}]→[/]  Improved predictive models trained on real-world degradation curves\n"
@@ -592,7 +592,7 @@ def step_intelligence_network() -> bool:
     console.print()
 
     opt_in = Confirm.ask(
-        f"  [{TEXT}]Share anonymized telemetry with the ThermalOS Intelligence Network?[/]",
+        f"  [{TEXT}]Share anonymized telemetry with the Theta Intelligence Network?[/]",
         default=True,
     )
 
@@ -660,29 +660,29 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
     # Launch commands
     console.print(Panel(
         f"  [bold {TEXT}]Start monitoring:[/]\n\n"
-        f"  [bold {GREEN}]thermalos monitor[/]\n\n"
+        f"  [bold {GREEN}]theta monitor[/]\n\n"
         f"  [dim]Other commands:[/]\n"
-        f"  [dim]thermalos classify[/]           [dim]— snapshot all GPUs right now[/]\n"
-        f"  [dim]thermalos baseline --gpu 0[/]   [dim]— re-lock virtual ambient[/]\n"
-        f"  [dim]thermalos serve[/]              [dim]— metrics only, no stdout[/]\n"
-        f"  [dim]thermalos train /path/data.csv[/] [dim]— retrain from new data[/]\n\n"
-        f"  [bold {BLUE}]Grafana dashboard:[/]  [dim]import thermalos_grafana.json (coming soon)[/]",
+        f"  [dim]theta classify[/]           [dim]— snapshot all GPUs right now[/]\n"
+        f"  [dim]theta baseline --gpu 0[/]   [dim]— re-lock virtual ambient[/]\n"
+        f"  [dim]theta serve[/]              [dim]— metrics only, no stdout[/]\n"
+        f"  [dim]theta train /path/data.csv[/] [dim]— retrain from new data[/]\n\n"
+        f"  [bold {BLUE}]Grafana dashboard:[/]  [dim]import theta_grafana.json (coming soon)[/]",
         border_style=BLUE,
         title=f"[{BLUE}]Quick start[/]",
         title_align="left",
         padding=(1, 2),
     ))
     console.print()
-    ok("ThermalOS is ready.")
+    ok("Theta is ready.")
     console.print(
-        f"\n  [{DIM}]Run [bold]thermalos monitor[/] to start. Press [bold]Ctrl+C[/] to stop.[/]\n"
+        f"\n  [{DIM}]Run [bold]theta monitor[/] to start. Press [bold]Ctrl+C[/] to stop.[/]\n"
     )
 
     want_launch = Confirm.ask(f"  [{TEXT}]Launch the agent now?[/]", default=True)
     if want_launch:
         console.print()
         console.print(Rule(style=DIM))
-        from thermalos.agent.daemon import ThermalOSAgent, AgentConfig
+        from theta.agent.daemon import ThetaAgent, AgentConfig
         cfg = AgentConfig(
             interval_sec      = config["interval_sec"],
             gpu_indices       = config["gpu_indices"],
@@ -694,8 +694,8 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
             k_warn            = config["k_warn"],
             k_critical        = config["k_critical"],
         )
-        agent = ThermalOSAgent(cfg)
-        console.print(f"  [bold {GREEN}]ThermalOS running.[/]  [{DIM}]Ctrl+C to stop.[/]\n")
+        agent = ThetaAgent(cfg)
+        console.print(f"  [bold {GREEN}]Theta running.[/]  [{DIM}]Ctrl+C to stop.[/]\n")
         try:
             asyncio.run(agent.run())
         except KeyboardInterrupt:
@@ -715,5 +715,5 @@ def run_wizard() -> None:
         opt_in_telemetry = step_intelligence_network()
         step_finish(sys_info, gpus, baselines, alert_cfg, opt_in_telemetry, redfish_cfg)
     except KeyboardInterrupt:
-        console.print(f"\n\n  [{DIM}]Setup cancelled. Run [bold]thermalos setup[/] to start again.[/]\n")
+        console.print(f"\n\n  [{DIM}]Setup cancelled. Run [bold]theta setup[/] to start again.[/]\n")
         sys.exit(0)

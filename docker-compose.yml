@@ -1,9 +1,9 @@
 services:
 
-  # ── ThermalOS agent ──────────────────────────────────────────────────────────
-  thermalos:
+  # ── Theta agent ──────────────────────────────────────────────────────────
+  theta:
     build: .
-    image: thermalos/agent:latest
+    image: runtheta/agent:latest
     restart: unless-stopped
     # GPU passthrough — requires nvidia-container-toolkit on the host.
     # Remove the `deploy` block if running without a GPU (demo mode kicks in).
@@ -17,12 +17,12 @@ services:
     ports:
       - "9101:9101"     # Prometheus metrics
     volumes:
-      - thermalos-config:/home/thermalos/.thermalos
-      - thermalos-logs:/var/log/thermalos
+      - theta-config:/home/theta/.theta
+      - theta-logs:/var/log/theta
     environment:
-      THERMALOS_INTERVAL: "5"
+      THETA_INTERVAL: "5"
     healthcheck:
-      test: ["CMD", "thermalos", "--help"]
+      test: ["CMD", "theta", "--help"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -52,13 +52,13 @@ services:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "thermalos"
+      GF_SECURITY_ADMIN_PASSWORD: "theta"
       GF_USERS_ALLOW_SIGN_UP: "false"
     depends_on:
       - prometheus
 
 volumes:
-  thermalos-config:
-  thermalos-logs:
+  theta-config:
+  theta-logs:
   prometheus-data:
   grafana-data:

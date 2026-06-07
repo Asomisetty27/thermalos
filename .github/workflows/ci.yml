@@ -42,7 +42,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install ruff
-      - run: ruff check thermalos/ --select E,F,W --ignore E501
+      - run: ruff check theta/ --select E,F,W --ignore E501
 
   docker:
     runs-on: ubuntu-latest
@@ -51,14 +51,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t thermalos/agent:ci .
+        run: docker build -t runtheta/agent:ci .
 
       - name: Smoke test (demo mode)
-        run: docker run --rm thermalos/agent:ci --help
+        run: docker run --rm runtheta/agent:ci --help
 
       - name: Tag and push (main only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-          docker tag thermalos/agent:ci thermalos/agent:latest
-          docker push thermalos/agent:latest
+          docker tag runtheta/agent:ci runtheta/agent:latest
+          docker push runtheta/agent:latest

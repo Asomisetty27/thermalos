@@ -3,9 +3,9 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: thermalos
+  - job_name: theta
     static_configs:
-      - targets: ['thermalos:9101']
+      - targets: ['theta:9101']
     relabel_configs:
       - source_labels: [__address__]
         target_label: instance

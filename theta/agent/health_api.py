@@ -1,5 +1,5 @@
 """
-ThermalOS Health API — /api/v1/health
+Theta Health API — /api/v1/health
 
 Lightweight HTTP server (stdlib only, no new deps) exposing a single health
 score per GPU. Designed for two callers:
@@ -163,7 +163,7 @@ class HealthAPIServer:
         try:
             self._server = HTTPServer(("0.0.0.0", self._port), handler_factory)
             self._thread = threading.Thread(
-                target=self._server.serve_forever, daemon=True, name="thermalos-health-api"
+                target=self._server.serve_forever, daemon=True, name="theta-health-api"
             )
             self._thread.start()
             log.info("health_api_started", port=self._port,

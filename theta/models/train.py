@@ -5,8 +5,8 @@ Trains GaussianNB and DecisionTreeClassifier on Stage 1 data with
 the 15-second steady-state filter applied, then saves to models/bundle/.
 
 Run:
-    python3 thermalos/models/train.py
-    python3 thermalos/models/train.py --csv /path/to/ThermalOS_Measurements_Raw.csv
+    python3 theta/models/train.py
+    python3 theta/models/train.py --csv /path/to/ThermalOS_Measurements_Raw.csv
 """
 
 from __future__ import annotations

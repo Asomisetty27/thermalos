@@ -1,8 +1,8 @@
 """
-ThermalOS Intelligence Network — anonymized telemetry reporter.
+Theta Intelligence Network — anonymized telemetry reporter.
 
 Every OSS user who opts in contributes anonymized GPU health signatures to a
-shared training dataset. The dataset trains ThermalOS's predictive models
+shared training dataset. The dataset trains Theta's predictive models
 (LSTM, Isolation Forest) on real-world degradation curves across thousands of
 GPUs. Users who share get community benchmarks in return: where does your GPU
 sit relative to the fleet P50/P95 for R_theta, ECC rate, and clock efficiency?
@@ -20,7 +20,7 @@ Architecture:
   - Upload is fire-and-forget; failure is logged and silently dropped
   - opt_in=False → TelemetryReporter is a no-op
 
-API endpoint: https://api.thermalos.io/v1/telemetry  (TBD — Supabase edge fn)
+API endpoint: https://api.runtheta.io/v1/telemetry  (TBD — Supabase edge fn)
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ThermalOS Intelligence Network endpoint — Supabase edge function (deployed)
+# Theta Intelligence Network endpoint — Supabase edge function (deployed)
 TELEMETRY_ENDPOINT = "https://gfghusfgnblazadnjvyk.supabase.co/functions/v1/telemetry_ingest"
 FLUSH_INTERVAL_S   = 86400   # 24 hours
 MIN_EVENTS_TO_SEND = 10      # don't bother sending tiny batches
@@ -121,7 +121,7 @@ class TelemetryBuffer:
 
 class TelemetryReporter:
     """
-    Async reporter that flushes the buffer to the ThermalOS Intelligence
+    Async reporter that flushes the buffer to the Theta Intelligence
     Network every 24 hours.
 
     If opt_in=False: all methods are no-ops. Zero network traffic.

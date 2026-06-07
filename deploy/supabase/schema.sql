@@ -1,4 +1,4 @@
--- ThermalOS Intelligence Network — Supabase schema
+-- Theta Intelligence Network — Supabase schema
 -- Run once: supabase db push (or paste into SQL editor)
 
 -- ── Raw telemetry batches ──────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ Virtual ambient (T_ref) estimation from GPU idle windows.
 No thermocouple required. T_ref is derived from the GPU's own stable idle
 periods: P-state ≥ P6, util ≈ 0%, stable temperature for ≥ 30 seconds.
 
-Baseline is persisted to ~/.thermalos/baselines.json so the agent restores
+Baseline is persisted to ~/.theta/baselines.json so the agent restores
 the virtual ambient on restart without a cold-start idle window requirement.
 """
 
@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-BASELINE_DIR    = Path.home() / ".thermalos"
+BASELINE_DIR    = Path.home() / ".theta"
 BASELINE_FILE   = BASELINE_DIR / "baselines.json"
 
 IDLE_UTIL_MAX   = 5.0    # % GPU utilization — below = idle candidate

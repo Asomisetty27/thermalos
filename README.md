@@ -1,11 +1,11 @@
-# ThermalOS
+# Theta
 
 **GPU thermal-power forensics agent.** Computes `R_θ = ΔT / P` in real time from your existing DCGM telemetry. That ratio is the only signal that separates a busy-hot GPU from a failing-hot one — and no incumbent computes it.
 
 ```
-thermalos_gpu_rtheta_cwatt{gpu_index="3"} 2.104   # zombie recovery — CUDA context stuck
-thermalos_gpu_rtheta_cwatt{gpu_index="3"} 0.724   # under load — healthy
-thermalos_gpu_rtheta_cwatt{gpu_index="3"} 1.281   # clean idle — normal
+theta_gpu_rtheta_cwatt{gpu_index="3"} 2.104   # zombie recovery — CUDA context stuck
+theta_gpu_rtheta_cwatt{gpu_index="3"} 0.724   # under load — healthy
+theta_gpu_rtheta_cwatt{gpu_index="3"} 1.281   # clean idle — normal
 ```
 
 ---
@@ -17,7 +17,7 @@ A GPU at 82°C could be:
 - **Cooling path failing** — ambient temperature up, heatsink degrading
 - **CUDA zombie** — process exited but context retained, drawing 31W at 0% utilization
 
-`nvidia-smi`, DCGM, and Mission Control all expose T and P as separate fields. None of them divide the two. ThermalOS does.
+`nvidia-smi`, DCGM, and Mission Control all expose T and P as separate fields. None of them divide the two. Theta does.
 
 ---
 
@@ -26,27 +26,27 @@ A GPU at 82°C could be:
 ### pip (single node, free forever)
 
 ```bash
-pip install thermalos
-thermalos setup        # interactive wizard — 90 seconds to first R_θ reading
-thermalos monitor      # start monitoring
+pip install theta
+theta setup        # interactive wizard — 90 seconds to first R_θ reading
+theta monitor      # start monitoring
 ```
 
 ### Docker
 
 ```bash
-docker run --gpus all -p 9101:9101 thermalos/agent:latest
+docker run --gpus all -p 9101:9101 theta/agent:latest
 ```
 
 ### Docker Compose (agent + Prometheus + Grafana)
 
 ```bash
-git clone https://github.com/Asomisetty27/thermalos
-cd thermalos
+git clone https://github.com/Asomisetty27/theta
+cd theta
 docker compose --profile metrics up
 ```
 
 Open `http://localhost:3000` — Grafana dashboard pre-provisioned, no setup required.
-Login: `admin` / `thermalos`
+Login: `admin` / `theta`
 
 ---
 
@@ -80,19 +80,19 @@ ELSE                 →  clean_idle / early recovery
 ## CLI reference
 
 ```
-thermalos setup                         Interactive wizard (run this first)
-thermalos monitor                       Run agent — blocks until Ctrl+C
-thermalos monitor --interval 2          Sample every 2s
-thermalos monitor --gpus 0,1,3          Monitor specific GPUs
-thermalos monitor --webhook <url>       Send alerts to Slack / generic webhook
-thermalos monitor --log alerts.jsonl    Append alerts to JSONL file
-thermalos monitor --port 9101           Prometheus metrics port (0 = disabled)
-thermalos monitor --nb                  Use Naive Bayes instead of Decision Tree
-thermalos baseline --gpu 0              Lock virtual ambient T_ref from idle window
-thermalos baseline --gpu 0 --manual 24  Set T_ref manually (°C)
-thermalos classify                      Snapshot classify all GPUs right now
-thermalos serve --port 9101             Metrics export only (no stdout alerts)
-thermalos train /path/data.csv          Retrain bundled models from new data
+theta setup                         Interactive wizard (run this first)
+theta monitor                       Run agent — blocks until Ctrl+C
+theta monitor --interval 2          Sample every 2s
+theta monitor --gpus 0,1,3          Monitor specific GPUs
+theta monitor --webhook <url>       Send alerts to Slack / generic webhook
+theta monitor --log alerts.jsonl    Append alerts to JSONL file
+theta monitor --port 9101           Prometheus metrics port (0 = disabled)
+theta monitor --nb                  Use Naive Bayes instead of Decision Tree
+theta baseline --gpu 0              Lock virtual ambient T_ref from idle window
+theta baseline --gpu 0 --manual 24  Set T_ref manually (°C)
+theta classify                      Snapshot classify all GPUs right now
+theta serve --port 9101             Metrics export only (no stdout alerts)
+theta train /path/data.csv          Retrain bundled models from new data
 ```
 
 ---
@@ -101,16 +101,16 @@ thermalos train /path/data.csv          Retrain bundled models from new data
 
 | Metric | Type | Description |
 |---|---|---|
-| `thermalos_gpu_rtheta_cwatt` | gauge | R_θ (C/W) — the core signal |
-| `thermalos_gpu_state_info` | gauge | Current classified state (label: `state`) |
-| `thermalos_gpu_drift_sigma` | gauge | Deviation from baseline in σ units |
-| `thermalos_gpu_temperature_celsius` | gauge | Junction temperature |
-| `thermalos_gpu_power_watts` | gauge | GPU power consumption |
-| `thermalos_gpu_utilization_ratio` | gauge | 0–1 utilization |
-| `thermalos_gpu_perf_state` | gauge | P-state (0=max, 8=idle) |
-| `thermalos_gpu_baseline_tref_celsius` | gauge | Virtual ambient T_ref |
-| `thermalos_gpu_window_rtheta_std` | gauge | Steady-state window σ |
-| `thermalos_gpu_alerts_total` | counter | Alerts (labels: `severity`, `state`) |
+| `theta_gpu_rtheta_cwatt` | gauge | R_θ (C/W) — the core signal |
+| `theta_gpu_state_info` | gauge | Current classified state (label: `state`) |
+| `theta_gpu_drift_sigma` | gauge | Deviation from baseline in σ units |
+| `theta_gpu_temperature_celsius` | gauge | Junction temperature |
+| `theta_gpu_power_watts` | gauge | GPU power consumption |
+| `theta_gpu_utilization_ratio` | gauge | 0–1 utilization |
+| `theta_gpu_perf_state` | gauge | P-state (0=max, 8=idle) |
+| `theta_gpu_baseline_tref_celsius` | gauge | Virtual ambient T_ref |
+| `theta_gpu_window_rtheta_std` | gauge | Steady-state window σ |
+| `theta_gpu_alerts_total` | counter | Alerts (labels: `severity`, `state`) |
 
 All metrics include a `gpu_index` label.
 
@@ -122,7 +122,7 @@ Every alert includes full forensic context:
 
 ```json
 {
-  "source":    "thermalos",
+  "source":    "theta",
   "severity":  "critical",
   "gpu_index": 3,
   "state":     "zombie_recovery",
@@ -146,7 +146,7 @@ Every alert includes full forensic context:
 
 ## Why not DCGM / Mission Control / Phaidra?
 
-| Capability | DCGM | Mission Control | Phaidra | **ThermalOS** |
+| Capability | DCGM | Mission Control | Phaidra | **Theta** |
 |---|:---:|:---:|:---:|:---:|
 | Computes R_θ | ✗ | ✗ | ✗ | **✓** |
 | Separates busy-hot vs failing-hot | ✗ | ✗ | ✗ | **✓** |
@@ -156,7 +156,7 @@ Every alert includes full forensic context:
 | Serves neocloud / mixed fleets | ✓ | ✗ | ✗ | **✓** |
 | Open-source agent | ✓ | ✗ | ✗ | **✓** |
 
-Mission Control ships only on Blackwell DGX/GB200. ThermalOS runs on any NVIDIA GPU reachable by pynvml.
+Mission Control ships only on Blackwell DGX/GB200. Theta runs on any NVIDIA GPU reachable by pynvml.
 
 ---
 
@@ -173,7 +173,7 @@ For Docker: [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-
 ## Retrain on your own data
 
 ```bash
-thermalos train /path/to/measurements.csv
+theta train /path/to/measurements.csv
 ```
 
 CSV schema: `phase, trial_second, rtheta_cwatt, power_w, util_pct, perf_state, ...`

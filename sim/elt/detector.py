@@ -1,8 +1,8 @@
 """
 Sensor model + R_theta anomaly detector for the E-LT simulation.
 
-This is the SAME detection logic ThermalOS ships in the OSS agent
-(thermalos/agent/window.py + the baseline+k-sigma drift rule), reimplemented
+This is the SAME detection logic Theta ships in the OSS agent
+(theta/agent/window.py + the baseline+k-sigma drift rule), reimplemented
 here on plain arrays so the lab analysis and the product share one definition.
 The protocol is explicit that lab and product must use one detector.
 

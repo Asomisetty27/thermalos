@@ -1,1 +1,1 @@
-"""ThermalOS simulation package."""
+"""Theta simulation package."""

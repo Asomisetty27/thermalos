@@ -1,7 +1,7 @@
 # E-LT Thermal Simulation
 
 A physics-grounded simulation of the **E-LT lead-time testbed** — the make-or-break
-experiment for Theta/ThermalOS. It answers the one question that gates the entire
+experiment for Theta/Theta. It answers the one question that gates the entire
 predictive-maintenance product claim:
 
 > **Does R_θ (effective thermal resistance) rise *detectably* before thermal
@@ -15,7 +15,7 @@ model, detector, and analysis are already validated.
 
 ## Why a lumped Cauer network (and not CFD or MATLAB)
 
-The ThermalOS detector only ever sees **scalar telemetry**: one junction
+The Theta detector only ever sees **scalar telemetry**: one junction
 temperature, one power number. It computes `R_θ = (T_j − T_ref) / P` from those.
 The lead-time question is therefore a **lumped transient** question, and the right
 model fidelity is a multi-node RC thermal network — not 3D CFD (whose spatial
@@ -69,7 +69,7 @@ Key modelling choices, all with provenance in `elt/params.py`:
 
 ## The detector
 
-`elt/detector.py` mirrors `thermalos/agent/window.py` + the baseline+kσ drift rule:
+`elt/detector.py` mirrors `theta/agent/window.py` + the baseline+kσ drift rule:
 
 1. Steady-state window — R_θ computed only when power is stable (Kundu's guidance).
 2. Healthy baseline — mean & std of windowed R_θ over the pre-degradation phase.
@@ -91,7 +91,7 @@ Key modelling choices, all with provenance in `elt/params.py`:
 ## Usage
 
 ```bash
-# from the thermalos-agent repo root, using the sim venv:
+# from the theta-agent repo root, using the sim venv:
 SIM=sim/.venv/bin/python
 
 # 1. validate the model against Stage 1 (run this first)

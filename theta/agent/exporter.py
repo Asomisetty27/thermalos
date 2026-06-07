@@ -3,15 +3,15 @@ Prometheus metrics exporter.
 
 Exposes a /metrics HTTP endpoint on the configured port (default 9101).
 Follows OpenTelemetry + Prometheus naming conventions:
-  thermalos_gpu_rtheta_cwatt            (gauge)
-  thermalos_gpu_temperature_celsius     (gauge)
-  thermalos_gpu_power_watts             (gauge)
-  thermalos_gpu_utilization_ratio       (gauge)
-  thermalos_gpu_state_info              (gauge, label=state)
-  thermalos_gpu_drift_sigma             (gauge)
-  thermalos_gpu_alerts_total            (counter, label=severity)
-  thermalos_gpu_baseline_tref_celsius   (gauge)
-  thermalos_build_info                  (gauge, static labels)
+  theta_gpu_rtheta_cwatt            (gauge)
+  theta_gpu_temperature_celsius     (gauge)
+  theta_gpu_power_watts             (gauge)
+  theta_gpu_utilization_ratio       (gauge)
+  theta_gpu_state_info              (gauge, label=state)
+  theta_gpu_drift_sigma             (gauge)
+  theta_gpu_alerts_total            (counter, label=severity)
+  theta_gpu_baseline_tref_celsius   (gauge)
+  theta_build_info                  (gauge, static labels)
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ except ImportError:
 
 class PrometheusExporter:
     """
-    Registers all ThermalOS metrics with the Prometheus default registry
+    Registers all Theta metrics with the Prometheus default registry
     and starts the HTTP server.
     """
 
@@ -52,85 +52,85 @@ class PrometheusExporter:
             return
 
         # Gauges
-        self.g_rtheta     = Gauge("thermalos_gpu_rtheta_cwatt",
+        self.g_rtheta     = Gauge("theta_gpu_rtheta_cwatt",
                                    "Effective thermal resistance R_theta (C/W)",
                                    ["gpu_index"])
-        self.g_temp       = Gauge("thermalos_gpu_temperature_celsius",
+        self.g_temp       = Gauge("theta_gpu_temperature_celsius",
                                    "Junction temperature (°C)",
                                    ["gpu_index"])
-        self.g_power      = Gauge("thermalos_gpu_power_watts",
+        self.g_power      = Gauge("theta_gpu_power_watts",
                                    "GPU power consumption (W)",
                                    ["gpu_index"])
-        self.g_util       = Gauge("thermalos_gpu_utilization_ratio",
+        self.g_util       = Gauge("theta_gpu_utilization_ratio",
                                    "GPU utilization 0–1",
                                    ["gpu_index"])
-        self.g_pstate     = Gauge("thermalos_gpu_perf_state",
+        self.g_pstate     = Gauge("theta_gpu_perf_state",
                                    "GPU performance state (0=max, 8=idle)",
                                    ["gpu_index"])
-        self.g_state      = Gauge("thermalos_gpu_state_info",
+        self.g_state      = Gauge("theta_gpu_state_info",
                                    "Current classified GPU state (1=active)",
                                    ["gpu_index", "state"])
-        self.g_drift      = Gauge("thermalos_gpu_drift_sigma",
+        self.g_drift      = Gauge("theta_gpu_drift_sigma",
                                    "R_theta deviation from baseline in σ units",
                                    ["gpu_index"])
-        self.g_tref       = Gauge("thermalos_gpu_baseline_tref_celsius",
+        self.g_tref       = Gauge("theta_gpu_baseline_tref_celsius",
                                    "Virtual ambient temperature T_ref (°C)",
                                    ["gpu_index"])
-        self.g_window_std = Gauge("thermalos_gpu_window_rtheta_std",
+        self.g_window_std = Gauge("theta_gpu_window_rtheta_std",
                                    "R_theta rolling window std dev (C/W)",
                                    ["gpu_index"])
 
         # Silicon-level health
-        self.g_ecc_sbit   = Gauge("thermalos_gpu_ecc_sbit_total",
+        self.g_ecc_sbit   = Gauge("theta_gpu_ecc_sbit_total",
                                    "Single-bit ECC errors (volatile, correctable)",
                                    ["gpu_index"])
-        self.g_ecc_dbit   = Gauge("thermalos_gpu_ecc_dbit_total",
+        self.g_ecc_dbit   = Gauge("theta_gpu_ecc_dbit_total",
                                    "Double-bit ECC errors (volatile, uncorrectable)",
                                    ["gpu_index"])
-        self.g_clock_eff  = Gauge("thermalos_gpu_clock_efficiency_ratio",
+        self.g_clock_eff  = Gauge("theta_gpu_clock_efficiency_ratio",
                                    "SM clock / max boost clock ratio (1.0 = no throttle)",
                                    ["gpu_index"])
 
         # Predictive risk
-        self.g_risk       = Gauge("thermalos_gpu_degradation_risk",
+        self.g_risk       = Gauge("theta_gpu_degradation_risk",
                                    "Physics-informed degradation risk score 0-1",
                                    ["gpu_index"])
 
         # SDC detection
-        self.c_sdc        = Counter("thermalos_sdc_events_total",
+        self.c_sdc        = Counter("theta_sdc_events_total",
                                     "Silent data corruption events detected",
                                     ["gpu_index"])
-        self.g_sdc_checks = Gauge("thermalos_sdc_last_check_timestamp",
+        self.g_sdc_checks = Gauge("theta_sdc_last_check_timestamp",
                                    "Unix timestamp of last SDC validation check",
                                    ["gpu_index"])
 
         # Redfish / chassis
-        self.g_inlet_temp = Gauge("thermalos_chassis_inlet_temp_celsius",
+        self.g_inlet_temp = Gauge("theta_chassis_inlet_temp_celsius",
                                    "Chassis inlet air temperature (°C)")
-        self.g_fan_min    = Gauge("thermalos_chassis_fan_rpm_min",
+        self.g_fan_min    = Gauge("theta_chassis_fan_rpm_min",
                                    "Minimum fan RPM across all chassis fans")
-        self.g_psu_watts  = Gauge("thermalos_chassis_psu_input_watts",
+        self.g_psu_watts  = Gauge("theta_chassis_psu_input_watts",
                                    "Total PSU input power draw (W)")
 
         # Fault curve classifier
-        self.g_fault_cause    = Gauge("thermalos_gpu_fault_cause",
+        self.g_fault_cause    = Gauge("theta_gpu_fault_cause",
                                       "Active fault cause (1 = active, 0 = inactive)",
                                       ["gpu_index", "cause"])
-        self.g_curve_slope    = Gauge("thermalos_gpu_rtheta_curve_slope",
+        self.g_curve_slope    = Gauge("theta_gpu_rtheta_curve_slope",
                                       "R_theta physical slope (C/W per W)",
                                       ["gpu_index"])
-        self.g_rtheta_intercept = Gauge("thermalos_gpu_rtheta_intercept_cwatt",
+        self.g_rtheta_intercept = Gauge("theta_gpu_rtheta_intercept_cwatt",
                                         "R_theta at low-power tier — thermal stack intercept (C/W)",
                                         ["gpu_index"])
 
         # Counters
-        self.c_alerts     = Counter("thermalos_gpu_alerts_total",
+        self.c_alerts     = Counter("theta_gpu_alerts_total",
                                     "Total alerts emitted",
                                     ["gpu_index", "severity", "state"])
 
         # Build info
         try:
-            self.i_build = Info("thermalos_build", "ThermalOS agent build info")
+            self.i_build = Info("theta_build", "Theta agent build info")
             self.i_build.info({"version": __version__, "stage1_rows": "5987"})
         except Exception:
             pass

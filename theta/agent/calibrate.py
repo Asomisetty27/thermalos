@@ -1,14 +1,14 @@
 """
-Per-hardware calibration for thermalos classifier thresholds.
+Per-hardware calibration for theta classifier thresholds.
 
 The bundled models are trained on Tesla T4 Stage 1 data. On other hardware
 (A100, H100, B200, etc.) R_theta ranges differ — T4 rules will misclassify.
 
-`thermalos calibrate` runs a two-phase measurement:
+`theta calibrate` runs a two-phase measurement:
   1. Idle phase   — wait for stable idle window, record R_theta_idle
   2. Load phase   — user starts a workload, record R_theta_load
 
-Derived thresholds are saved to ~/.thermalos/calibration.json.
+Derived thresholds are saved to ~/.theta/calibration.json.
 StateClassifier loads this at init and substitutes calibrated values.
 """
 
@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-CALIBRATION_FILE = Path.home() / ".thermalos" / "calibration.json"
+CALIBRATION_FILE = Path.home() / ".theta" / "calibration.json"
 
 # T4 Stage 1 reference points
 _T4_RTHETA_IDLE      = 1.28

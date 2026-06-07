@@ -5,7 +5,7 @@
     { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
   ],
   "annotations": { "list": [] },
-  "description": "ThermalOS — GPU thermal-power forensics. R_θ = ΔT/P.",
+  "description": "Theta — GPU thermal-power forensics. R_θ = ΔT/P.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -35,9 +35,9 @@
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "name", "colorMode": "background" },
       "targets": [
-        { "expr": "thermalos_gpu_state_info{state=\"under_load\"}", "legendFormat": "GPU {{gpu_index}} under_load", "refId": "A" },
-        { "expr": "thermalos_gpu_state_info{state=\"zombie_recovery\"}", "legendFormat": "GPU {{gpu_index}} zombie", "refId": "B" },
-        { "expr": "thermalos_gpu_state_info{state=\"drifting\"}", "legendFormat": "GPU {{gpu_index}} drifting", "refId": "C" }
+        { "expr": "theta_gpu_state_info{state=\"under_load\"}", "legendFormat": "GPU {{gpu_index}} under_load", "refId": "A" },
+        { "expr": "theta_gpu_state_info{state=\"zombie_recovery\"}", "legendFormat": "GPU {{gpu_index}} zombie", "refId": "B" },
+        { "expr": "theta_gpu_state_info{state=\"drifting\"}", "legendFormat": "GPU {{gpu_index}} drifting", "refId": "C" }
       ],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
@@ -62,7 +62,7 @@
         }
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "showThresholdMarkers": true },
-      "targets": [{ "expr": "thermalos_gpu_rtheta_cwatt", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_rtheta_cwatt", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -87,7 +87,7 @@
         }
       },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] } },
-      "targets": [{ "expr": "thermalos_gpu_rtheta_cwatt", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_rtheta_cwatt", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -109,7 +109,7 @@
         }
       },
       "options": { "tooltip": { "mode": "multi" } },
-      "targets": [{ "expr": "thermalos_gpu_drift_sigma", "legendFormat": "GPU {{gpu_index}} σ", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_drift_sigma", "legendFormat": "GPU {{gpu_index}} σ", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -132,7 +132,7 @@
           "color": { "mode": "palette-classic" }
         }
       },
-      "targets": [{ "expr": "thermalos_gpu_temperature_celsius", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_temperature_celsius", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -147,7 +147,7 @@
           "color": { "mode": "palette-classic" }
         }
       },
-      "targets": [{ "expr": "thermalos_gpu_power_watts", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_power_watts", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -163,7 +163,7 @@
           "color": { "mode": "palette-classic" }
         }
       },
-      "targets": [{ "expr": "thermalos_gpu_utilization_ratio", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_utilization_ratio", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -185,7 +185,7 @@
         }
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
-      "targets": [{ "expr": "sum(thermalos_gpu_alerts_total)", "legendFormat": "Alerts", "refId": "A" }],
+      "targets": [{ "expr": "sum(theta_gpu_alerts_total)", "legendFormat": "Alerts", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -200,9 +200,9 @@
         }
       },
       "targets": [
-        { "expr": "increase(thermalos_gpu_alerts_total{severity=\"critical\"}[5m])", "legendFormat": "critical", "refId": "A" },
-        { "expr": "increase(thermalos_gpu_alerts_total{severity=\"warning\"}[5m])",  "legendFormat": "warning",  "refId": "B" },
-        { "expr": "increase(thermalos_gpu_alerts_total{severity=\"info\"}[5m])",     "legendFormat": "info",     "refId": "C" }
+        { "expr": "increase(theta_gpu_alerts_total{severity=\"critical\"}[5m])", "legendFormat": "critical", "refId": "A" },
+        { "expr": "increase(theta_gpu_alerts_total{severity=\"warning\"}[5m])",  "legendFormat": "warning",  "refId": "B" },
+        { "expr": "increase(theta_gpu_alerts_total{severity=\"info\"}[5m])",     "legendFormat": "info",     "refId": "C" }
       ],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
@@ -221,7 +221,7 @@
         }
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
-      "targets": [{ "expr": "thermalos_gpu_baseline_tref_celsius", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_baseline_tref_celsius", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     },
 
@@ -241,19 +241,19 @@
         }
       },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
-      "targets": [{ "expr": "thermalos_gpu_window_rtheta_std", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
+      "targets": [{ "expr": "theta_gpu_window_rtheta_std", "legendFormat": "GPU {{gpu_index}}", "refId": "A" }],
       "datasource": { "type": "prometheus", "uid": "prometheus" }
     }
 
   ],
   "refresh": "10s",
   "schemaVersion": 38,
-  "tags": ["gpu", "thermal", "thermalos"],
+  "tags": ["gpu", "thermal", "theta"],
   "templating": { "list": [] },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "ThermalOS — GPU Thermal Forensics",
-  "uid": "thermalos-v1",
+  "title": "Theta — GPU Thermal Forensics",
+  "uid": "theta-v1",
   "version": 1
 }

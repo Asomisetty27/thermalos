@@ -1,5 +1,5 @@
 """
-E-LT (lead-time testbed) thermal simulation for ThermalOS.
+E-LT (lead-time testbed) thermal simulation for Theta.
 
 Answers the make-or-break question: does R_theta_eff rise detectably BEFORE
 thermal throttling, and by how much lead time, per degradation mode?

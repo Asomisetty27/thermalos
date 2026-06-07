@@ -3,7 +3,7 @@ Core metric types and R_theta computation.
 
 R_theta_eff(t) = (T_junction(t) - T_ref) / P_GPU(t)
 
-This is the foundational ThermalOS metric. No other tool computes it.
+This is the foundational Theta metric. No other tool computes it.
 """
 
 from __future__ import annotations

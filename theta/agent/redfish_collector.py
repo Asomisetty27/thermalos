@@ -14,7 +14,7 @@ Falls back silently if:
 
 Activate via AgentConfig(use_redfish=True, redfish_host="192.168.1.1",
                           redfish_user="admin", redfish_password="...").
-Or read from ~/.thermalos/config.json (written by the setup wizard).
+Or read from ~/.theta/config.json (written by the setup wizard).
 
 DGX B200 Redfish base URI: https://<BMC_IP>/redfish/v1/
 Key endpoints:

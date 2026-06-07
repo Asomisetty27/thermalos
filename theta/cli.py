@@ -1,5 +1,5 @@
 """
-ThermalOS CLI — thermalos <command>
+Theta CLI — theta <command>
 
 Commands:
   setup       Interactive setup wizard (run this first)
@@ -28,17 +28,17 @@ from rich import box
 from . import __version__
 
 app     = typer.Typer(
-    name="thermalos",
+    name="theta",
     add_completion=False,
     pretty_exceptions_enable=False,
-    help="GPU thermal-power forensics. Run [bold green]thermalos setup[/] to get started.",
+    help="GPU thermal-power forensics. Run [bold green]theta setup[/] to get started.",
 )
 console = Console()
 
 
 # ── Saved-config helpers ──────────────────────────────────────────────────────
 
-_CONFIG_PATH = Path.home() / ".thermalos" / "config.json"
+_CONFIG_PATH = Path.home() / ".theta" / "config.json"
 
 
 def _saved_config() -> dict:
@@ -81,8 +81,8 @@ def monitor(
     sigma_warn:  float           = typer.Option(2.0,   "--sigma-warn",       help="Drift warning threshold (σ)"),
     sigma_crit:  float           = typer.Option(3.5,   "--sigma-crit",       help="Drift critical threshold (σ)"),
 ):
-    """Run the ThermalOS monitoring agent. Reads ~/.thermalos/config.json if present (CLI flags override)."""
-    from .agent.daemon import ThermalOSAgent, AgentConfig
+    """Run the Theta monitoring agent. Reads ~/.theta/config.json if present (CLI flags override)."""
+    from .agent.daemon import ThetaAgent, AgentConfig
 
     saved = _saved_config()
 
@@ -120,10 +120,10 @@ def monitor(
     # rebind so the banner below uses resolved values
     interval, port = interval_v, port_v
 
-    agent = ThermalOSAgent(cfg)
+    agent = ThetaAgent(cfg)
 
     console.print(
-        f"[bold green]ThermalOS v{__version__}[/bold green]  "
+        f"[bold green]Theta v{__version__}[/bold green]  "
         f"[dim]interval={interval}s  classifier={agent._classifier.mode}  "
         f"{'prometheus:' + str(port) if port > 0 else 'no-metrics'}[/dim]"
     )
@@ -277,7 +277,7 @@ def calibrate(
     skip_load:    bool  = typer.Option(False, "--skip-load",       help="Calibrate idle only (skip load phase)"),
 ):
     """
-    Measure hardware-specific R_theta thresholds and save to ~/.thermalos/calibration.json.
+    Measure hardware-specific R_theta thresholds and save to ~/.theta/calibration.json.
 
     Run this once after setup on any GPU that is not a Tesla T4. The bundled
     classifiers are trained on T4 Stage 1 data — they will misclassify on
@@ -318,7 +318,7 @@ def calibrate(
     except Exception:
         pass
 
-    console.print(f"\n[bold]thermalos calibrate[/bold] — {gpu_name} (GPU {gpu})\n")
+    console.print(f"\n[bold]theta calibrate[/bold] — {gpu_name} (GPU {gpu})\n")
 
     # ── Phase 1: Idle ─────────────────────────────────────────────────────────
     console.print("[bold cyan]Phase 1 — Idle[/bold cyan]")
@@ -337,7 +337,7 @@ def calibrate(
     if rtheta_idle is None:
         console.print(
             "[red]✗[/red] Idle phase timed out. "
-            "Ensure the GPU is idle and retry, or run [bold]thermalos baseline --manual <T>[/bold] first."
+            "Ensure the GPU is idle and retry, or run [bold]theta baseline --manual <T>[/bold] first."
         )
         raise typer.Exit(code=1)
 
@@ -409,7 +409,7 @@ def calibrate(
 
     console.print(t)
     console.print("\n[green]Calibration complete.[/green] "
-                  "Run [bold]thermalos monitor[/bold] to start using calibrated thresholds.")
+                  "Run [bold]theta monitor[/bold] to start using calibrated thresholds.")
 
 
 # ── train ─────────────────────────────────────────────────────────────────────
@@ -435,9 +435,9 @@ def serve(
     interval: float = typer.Option(5.0, "--interval", "-i"),
 ):
     """Run agent with Prometheus metrics export only (no stdout alerts)."""
-    from .agent.daemon import ThermalOSAgent, AgentConfig
+    from .agent.daemon import ThetaAgent, AgentConfig
     cfg   = AgentConfig(interval_sec=interval, prometheus_port=port, quiet=True)
-    agent = ThermalOSAgent(cfg)
+    agent = ThetaAgent(cfg)
     console.print(f"[green]Metrics:[/green] http://localhost:{port}/metrics")
     asyncio.run(agent.run())
 

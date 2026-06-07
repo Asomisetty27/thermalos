@@ -19,7 +19,7 @@ The thermal path is modelled as a 3-node Cauer (physical ladder) network:
   T_amb ambient (boundary)
 
 Steady state reduces to  T_j = T_amb + P*(Rjc + Rct + Rsa),  i.e. R_theta = Rjc+Rct+Rsa,
-exactly the quantity ThermalOS computes as (T_j - T_ref)/P.
+exactly the quantity Theta computes as (T_j - T_ref)/P.
 
 Degradation modes act on specific resistances:
   TIM dry-out        -> Rct rises

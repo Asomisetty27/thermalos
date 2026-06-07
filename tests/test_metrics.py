@@ -1,5 +1,5 @@
 """
-Unit tests for the ThermalOS agent core pipeline.
+Unit tests for the Theta agent core pipeline.
 Tests run without a GPU (demo mode).
 """
 
@@ -7,16 +7,16 @@ import math
 import time
 import pytest
 
-from thermalos.agent.metrics import (
+from theta.agent.metrics import (
     compute_rtheta, enrich, RawSample, GPUState, CLASS_INDEX_TO_STATE,
     MIN_POWER_W
 )
-from thermalos.agent.baseline import BaselineManager
-from thermalos.agent.window   import SteadyStateWindow
-from thermalos.agent.classifier import StateClassifier, _rule_classify
-from thermalos.agent.detector import DriftDetector
-from thermalos.agent.state    import GPUStateMachine
-from thermalos.agent.metrics  import ClassifiedSample, enrich
+from theta.agent.baseline import BaselineManager
+from theta.agent.window   import SteadyStateWindow
+from theta.agent.classifier import StateClassifier, _rule_classify
+from theta.agent.detector import DriftDetector
+from theta.agent.state    import GPUStateMachine
+from theta.agent.metrics  import ClassifiedSample, enrich
 
 
 # ── compute_rtheta ────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ def test_sklearn_classifier_loads():
 
 def test_sklearn_classifier_under_load():
     clf = StateClassifier()
-    from thermalos.agent.window import WindowResult
+    from theta.agent.window import WindowResult
     w = WindowResult(
         gpu_index=0, timestamp=time.time(),
         rtheta_mean=0.72, rtheta_std=0.01,
@@ -143,7 +143,7 @@ def test_sklearn_classifier_under_load():
 
 def test_sklearn_classifier_zombie():
     clf = StateClassifier()
-    from thermalos.agent.window import WindowResult
+    from theta.agent.window import WindowResult
     w = WindowResult(
         gpu_index=0, timestamp=time.time(),
         rtheta_mean=1.54, rtheta_std=0.01,
@@ -200,12 +200,12 @@ def _make_classified(gpu, state, rtheta=0.72, conf=0.99):
         mem_util_pct=60.0, perf_state=0,
         clock_sm_mhz=1600, clock_mem_mhz=8000,
     )
-    from thermalos.agent.metrics import EnrichedSample
+    from theta.agent.metrics import EnrichedSample
     enriched = EnrichedSample(raw=raw, t_ref=25.0, rtheta=rtheta, rtheta_valid=True)
     return ClassifiedSample(enriched=enriched, state=state, confidence=conf, rtheta_mean=rtheta)
 
 def _make_drift(gpu, drifting=False, critical=False, sigma=None, baseline=None):
-    from thermalos.agent.detector import DriftResult
+    from theta.agent.detector import DriftResult
     return DriftResult(
         gpu_index=gpu, timestamp=time.time(), rtheta=0.72,
         baseline_mean=baseline, baseline_std=0.05,

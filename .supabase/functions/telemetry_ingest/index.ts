@@ -1,7 +1,7 @@
-// ThermalOS Intelligence Network — Supabase Edge Function
+// Theta Intelligence Network — Supabase Edge Function
 // Deploy: supabase functions deploy telemetry_ingest
 //
-// Receives anonymized GPU health batches from the thermalos agent.
+// Receives anonymized GPU health batches from the theta agent.
 // Validates, normalizes, inserts into gpu_health_hourly.
 // Returns community benchmarks for the agent's GPU generation.
 

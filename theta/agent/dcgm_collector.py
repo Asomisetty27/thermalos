@@ -79,7 +79,7 @@ class DCGMEnricher:
             # Field group for our target metrics
             self._field_group = pydcgm.DcgmFieldGroup(
                 self._handle,
-                "thermalos_fields",
+                "theta_fields",
                 _FIELD_IDS,
             )
 

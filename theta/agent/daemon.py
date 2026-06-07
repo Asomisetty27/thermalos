@@ -1,5 +1,5 @@
 """
-Main async event loop — the ThermalOS agent daemon.
+Main async event loop — the Theta agent daemon.
 
 Pipeline per tick:
   Collector → EnrichedSample (R_theta) → BaselineManager.update()
@@ -87,17 +87,17 @@ class AgentConfig:
     redfish_user:       Optional[str]  = None
     redfish_password:   Optional[str]  = None
 
-    # ThermalOS Intelligence Network — anonymized telemetry opt-in
+    # Theta Intelligence Network — anonymized telemetry opt-in
     data_sharing:       bool  = False
 
 
-class ThermalOSAgent:
+class ThetaAgent:
     """
-    The ThermalOS monitoring agent.
+    The Theta monitoring agent.
 
     Usage:
         config = AgentConfig(interval_sec=5, webhook_url="https://...")
-        agent  = ThermalOSAgent(config)
+        agent  = ThetaAgent(config)
         await  agent.run()   # blocks until SIGINT/SIGTERM
     """
 
@@ -518,7 +518,7 @@ class ThermalOSAgent:
         return base
 
     def status(self) -> dict:
-        """Snapshot of current agent state — used by CLI `thermalos status`."""
+        """Snapshot of current agent state — used by CLI `theta status`."""
         states = {}
         for gpu_idx, rec in self._statemachine.all_states().items():
             b = self._baseline.get_baseline(gpu_idx)

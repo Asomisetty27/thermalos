@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "thermalos"
+name = "runtheta"
 version = "0.1.9"
 description = "GPU thermal-power forensics agent. Computes R_theta = ΔT/P in real time."
 readme = "README.md"
@@ -26,10 +26,10 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-thermalos = "thermalos.cli:app"
+theta = "theta.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["thermalos"]
+packages = ["theta"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

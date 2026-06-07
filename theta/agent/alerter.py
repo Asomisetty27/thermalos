@@ -86,7 +86,7 @@ class WebhookAlerter(BaseAlerter):
     Generic format: flat JSON with full context.
 
     Retries up to 3 times with exponential backoff (SSL/network resilience —
-    same pattern as thermalos_e003_rerun.py sheet writes).
+    same pattern as theta_e003_rerun.py sheet writes).
     """
 
     def __init__(self, url: str, max_retries: int = 3):
@@ -121,13 +121,13 @@ class WebhookAlerter(BaseAlerter):
                         {"title": "Timestamp",   "value": ts,                                                     "short": True},
                     ],
                     "text":   event.message,
-                    "footer": "ThermalOS",
+                    "footer": "Theta",
                     "ts":     int(event.timestamp),
                 }]
             }
 
         return {
-            "source":           "thermalos",
+            "source":           "theta",
             "version":          __version__,
             "timestamp":        ts,
             "severity":         sev,

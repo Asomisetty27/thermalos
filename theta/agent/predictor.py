@@ -13,7 +13,7 @@ Phase 2 (once Cal Poly data accumulates): SGDClassifier trains online on
   as "failed" → all feature vectors from the preceding 72hr get label=1.
 
 Output: DegradationRisk(score_0_to_1, horizon_str, explanation)
-Prometheus: thermalos_degradation_risk{gpu, horizon}
+Prometheus: theta_degradation_risk{gpu, horizon}
 
 The score is intentionally conservative in Phase 1. A score of 0.80 should
 mean "we are fairly confident something is wrong," not "we saw one bad reading."

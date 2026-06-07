@@ -101,7 +101,7 @@ class SDCHunter:
     def _ensure_script(self) -> Path:
         if self._script_path and self._script_path.exists():
             return self._script_path
-        tmp = Path(tempfile.mktemp(suffix="_thermalos_sdc.py"))
+        tmp = Path(tempfile.mktemp(suffix="_theta_sdc.py"))
         tmp.write_text(_VALIDATION_SCRIPT)
         self._script_path = tmp
         return tmp

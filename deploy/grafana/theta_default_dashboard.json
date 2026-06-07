@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "ThermalOS default dashboard — 6 panels covering the essentials: R_theta, junction temp, GPU state, drift, ECC, predictive risk. Import via Dashboards → Import → Upload JSON.",
+  "description": "Theta default dashboard — 6 panels covering the essentials: R_theta, junction temp, GPU state, drift, ECC, predictive risk. Import via Dashboards → Import → Upload JSON.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -28,7 +28,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_rtheta_cwatt",
+          "expr": "theta_gpu_rtheta_cwatt",
           "legendFormat": "GPU {{gpu_index}}",
           "refId": "A"
         }
@@ -59,7 +59,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"},
         "legend": {"showLegend": true, "displayMode": "table", "placement": "right", "calcs": ["mean", "lastNotNull", "max"]}
       },
-      "description": "Effective thermal resistance — the headline ThermalOS metric. Sustained drift above the yellow threshold indicates cooling-path degradation."
+      "description": "Effective thermal resistance — the headline Theta metric. Sustained drift above the yellow threshold indicates cooling-path degradation."
     },
     {
       "id": 2,
@@ -69,7 +69,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_temperature_celsius",
+          "expr": "theta_gpu_temperature_celsius",
           "legendFormat": "GPU {{gpu_index}}",
           "refId": "A"
         }
@@ -106,7 +106,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_state_info == 1",
+          "expr": "theta_gpu_state_info == 1",
           "legendFormat": "GPU {{gpu_index}}: {{state}}",
           "refId": "A"
         }
@@ -139,7 +139,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_degradation_risk",
+          "expr": "theta_gpu_degradation_risk",
           "legendFormat": "GPU {{gpu_index}}",
           "refId": "A"
         }
@@ -176,7 +176,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_drift_sigma",
+          "expr": "theta_gpu_drift_sigma",
           "legendFormat": "GPU {{gpu_index}}",
           "refId": "A"
         }
@@ -208,7 +208,7 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "sum by (severity) (increase(thermalos_gpu_alerts_total[5m]))",
+          "expr": "sum by (severity) (increase(theta_gpu_alerts_total[5m]))",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -233,12 +233,12 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "targets": [
         {
-          "expr": "thermalos_gpu_ecc_sbit_total",
+          "expr": "theta_gpu_ecc_sbit_total",
           "legendFormat": "GPU {{gpu_index}} sbit (correctable)",
           "refId": "A"
         },
         {
-          "expr": "thermalos_gpu_ecc_dbit_total",
+          "expr": "theta_gpu_ecc_dbit_total",
           "legendFormat": "GPU {{gpu_index}} dbit (UNCORRECTABLE)",
           "refId": "B"
         }
@@ -257,13 +257,13 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["thermalos", "gpu", "ai-factory", "noyce"],
+  "tags": ["theta", "gpu", "ai-factory", "noyce"],
   "templating": {"list": []},
   "time": {"from": "now-6h", "to": "now"},
   "timepicker": {},
   "timezone": "America/Los_Angeles",
-  "title": "ThermalOS — Cal Poly Noyce AI Factory",
-  "uid": "thermalos-noyce-default",
+  "title": "Theta — Cal Poly Noyce AI Factory",
+  "uid": "theta-noyce-default",
   "version": 1,
   "weekStart": ""
 }
