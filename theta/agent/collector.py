@@ -163,11 +163,35 @@ class NVMLCollector:
         except pynvml.NVMLError:
             sm_clock_max_mhz = 0
 
+        # Power sanity check — B200 and other dual-die/multi-chip GPUs can
+        # report per-die power via some NVML versions while T_junction reflects
+        # the hotter die. If reported power is suspiciously low while the GPU
+        # is clearly active, the R_θ denominator will be wrong. Log and clamp
+        # to None (enrich() will mark rtheta_valid=False) rather than silently
+        # emitting a bogus metric.
+        power_f = float(power)
+        try:
+            from .hw_profiles import resolve_or_default as _rp
+            _prof = _rp(self._gpu_names[idx] if idx < len(self._gpu_names) else "")
+            _idle_floor = _prof.idle_floor_w if _prof else 5.0
+        except Exception:
+            _idle_floor = 5.0
+        if power_f < _idle_floor * 0.4 and float(util.gpu) > 15.0:
+            log.warning(
+                "power_reading_suspect",
+                gpu=idx,
+                power_w=power_f,
+                util_pct=float(util.gpu),
+                idle_floor_w=_idle_floor,
+                note="power < 40% of idle floor while utilization high — possible dual-die reporting issue; skipping R_θ for this sample",
+            )
+            power_f = 0.0   # drives rtheta_valid=False in enrich()
+
         return RawSample(
             gpu_index        = idx,
             timestamp        = time.time(),
             temp_junction    = float(temp),
-            power_w          = float(power),
+            power_w          = power_f,
             util_pct         = float(util.gpu),
             mem_util_pct     = float(util.memory),
             perf_state       = int(str(pstate).replace("PerformanceState_", "").replace("P", "")),

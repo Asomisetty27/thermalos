@@ -270,10 +270,12 @@ def _print_classify_table(windows, clf) -> None:
 
 @app.command()
 def calibrate(
-    gpu:          int   = typer.Option(0,     "--gpu",      "-g",  help="GPU index to calibrate"),
-    idle_wait:    float = typer.Option(120.0, "--idle-wait",       help="Max seconds to wait for stable idle"),
-    load_wait:    float = typer.Option(120.0, "--load-wait",       help="Max seconds to wait for stable load"),
-    skip_load:    bool  = typer.Option(False, "--skip-load",       help="Calibrate idle only (skip load phase)"),
+    gpu:              int            = typer.Option(0,     "--gpu",              "-g", help="GPU index to calibrate"),
+    idle_wait:        float          = typer.Option(120.0, "--idle-wait",              help="Max seconds to wait for stable idle"),
+    load_wait:        float          = typer.Option(120.0, "--load-wait",              help="Max seconds to wait for stable load"),
+    skip_load:        bool           = typer.Option(False, "--skip-load",              help="Calibrate idle only (skip load phase)"),
+    ambient:          Optional[float]= typer.Option(None,  "--ambient",           "-a", help="Known ambient/coolant temp °C — skips idle-phase wait entirely (use for always-busy DGX nodes)"),
+    calibration_file: Optional[str]  = typer.Option(None,  "--calibration-file",        help="Write calibration to this path instead of ~/.theta/calibration.json (use for shared service installs)"),
 ):
     """
     Measure hardware-specific R_theta thresholds and save to ~/.theta/calibration.json.
@@ -284,9 +286,15 @@ def calibrate(
 
     Two phases:
       1. Idle phase   — waits for the GPU to reach stable idle automatically.
+                        Skip with --ambient <temp> if the GPU is never truly idle
+                        (e.g., always-running DGX nodes at an AI Factory).
       2. Load phase   — prompts you to start a workload, then locks the load R_theta.
+
+    For shared production installs (systemd service user):
+      theta calibrate --gpu 0 --calibration-file /etc/theta/calibration.json
     """
     import asyncio
+    from pathlib import Path as _Path
     from .agent.baseline import BaselineManager
     from .agent.collector import NVMLCollector, CollectorConfig
     from .agent.calibrate import (
@@ -294,7 +302,8 @@ def calibrate(
         derive_thresholds, run_idle_phase, run_load_phase,
     )
 
-    cal_mgr = CalibrationManager()
+    cal_file = _Path(calibration_file) if calibration_file else None
+    cal_mgr = CalibrationManager(_file=cal_file)
     existing = cal_mgr.get(gpu)
     if existing:
         console.print(
@@ -319,28 +328,60 @@ def calibrate(
 
     console.print(f"\n[bold]theta calibrate[/bold] — {gpu_name} (GPU {gpu})\n")
 
-    # ── Phase 1: Idle ─────────────────────────────────────────────────────────
-    console.print("[bold cyan]Phase 1 — Idle[/bold cyan]")
-    console.print(f"  Waiting up to {idle_wait:.0f}s for stable idle (util < 5%)…")
-    console.print("  [dim]Make sure no compute workloads are running.[/dim]\n")
-
     bm = BaselineManager()
 
-    async def _idle():
-        cfg = CollectorConfig(interval_sec=2.0, gpu_indices=[gpu])
-        async with NVMLCollector(cfg) as c:
-            return await run_idle_phase(c, bm, max_wait_sec=idle_wait)
+    # ── Phase 1: Idle (or --ambient bypass) ───────────────────────────────────
+    rtheta_idle: Optional[float] = None
 
-    rtheta_idle = asyncio.run(_idle())
+    if ambient is not None:
+        # Bypass idle-phase wait when the ambient temperature is known externally
+        # (BMC reading, coolant inlet sensor) or when the GPU is always busy.
+        # We seed T_ref from the supplied ambient and compute R_θ_idle from the
+        # hardware profile's expected idle R_θ value.
+        from .agent.hw_profiles import resolve_or_default
+        profile = resolve_or_default(gpu_name)
+        bm.set_external_ambient(gpu, ambient, source="manual_ambient_flag")
 
-    if rtheta_idle is None:
+        # Derive expected idle R_θ from profile + supplied ambient.
+        # R_θ_idle = profile.rtheta_expected_idle (physics-based estimate).
+        # This gives the classifier a plausible idle threshold even without
+        # observing an actual idle window — better than T4 defaults on B200/H100.
+        rtheta_idle = profile.rtheta_expected_idle
         console.print(
-            "[red]✗[/red] Idle phase timed out. "
-            "Ensure the GPU is idle and retry, or run [bold]theta baseline --manual <T>[/bold] first."
+            f"[yellow]⚠[/yellow]  [bold]--ambient mode[/bold]: skipping idle-phase wait.\n"
+            f"  Using supplied ambient [bold]{ambient:.1f} °C[/bold] as T_ref, "
+            f"profile R_θ_idle estimate [bold]{rtheta_idle:.4f} C/W[/bold].\n"
+            f"  [dim]Accuracy is lower than an observed idle window. "
+            f"Re-run without --ambient during a maintenance window for best results.[/dim]\n"
         )
-        raise typer.Exit(code=1)
+    else:
+        console.print("[bold cyan]Phase 1 — Idle[/bold cyan]")
+        console.print(f"  Waiting up to {idle_wait:.0f}s for stable idle (util < 5%)…")
+        console.print(
+            "  [dim]Make sure no compute workloads are running.\n"
+            "  On always-busy nodes (DGX, AI Factory), use: "
+            "[bold]theta calibrate --ambient <inlet_temp_c>[/bold][/dim]\n"
+        )
 
-    console.print(f"[green]✓[/green] Idle R_θ locked: [bold]{rtheta_idle:.4f} C/W[/bold]\n")
+        async def _idle():
+            cfg = CollectorConfig(interval_sec=2.0, gpu_indices=[gpu])
+            async with NVMLCollector(cfg) as c:
+                return await run_idle_phase(c, bm, max_wait_sec=idle_wait)
+
+        rtheta_idle = asyncio.run(_idle())
+
+        if rtheta_idle is None:
+            console.print(
+                "[red]✗[/red] Idle phase timed out.\n"
+                "  Options:\n"
+                "  • Free the GPU and retry\n"
+                f"  • Use [bold]theta calibrate --gpu {gpu} --ambient <inlet_temp_c>[/bold] "
+                "to bypass with a known temperature\n"
+                f"  • Use [bold]theta baseline --gpu {gpu} --manual <T>[/bold] to set T_ref manually"
+            )
+            raise typer.Exit(code=1)
+
+        console.print(f"[green]✓[/green] Idle R_θ locked: [bold]{rtheta_idle:.4f} C/W[/bold]\n")
 
     # ── Phase 2: Load (optional) ──────────────────────────────────────────────
     rtheta_load: Optional[float] = None
@@ -404,7 +445,7 @@ def calibrate(
     t.add_row("load_threshold",   f"{load_threshold:.3f} C/W",      "R_θ ≤ this → under_load")
     t.add_row("idle_threshold",   f"{idle_threshold:.3f} C/W",      "R_θ ≥ this → idle territory")
     t.add_row("source",           source,                           "")
-    t.add_row("saved to",         str(CalibrationManager()._file),  "")
+    t.add_row("saved to",         str(cal_mgr._file),               "")
 
     console.print(t)
     console.print("\n[green]Calibration complete.[/green] "

@@ -637,6 +637,66 @@ class ThetaAgent:
         """Health API callback: return cached rich state for one GPU."""
         return self._agent_details_cache.get(gpu_index)
 
+    def _check_hardware_ready(self) -> bool:
+        """Block daemon start on extrapolated-profile hardware without calibration.
+
+        Returns True if safe to proceed. Prints actionable instructions and
+        returns False if the operator must run `theta calibrate` first.
+
+        The check is profile-confidence-gated: T4 profiles are measured, so they
+        pass unconditionally. Extrapolated profiles (all other GPU classes) require
+        a matching calibration entry so the classifier uses measured thresholds
+        instead of physics-based guesses.
+        """
+        from .calibrate import CalibrationManager
+        from .hw_profiles import resolve_or_default
+
+        import sys
+        from rich.console import Console as _Console
+        from rich.panel import Panel as _Panel
+
+        cal = CalibrationManager()
+        bad: list[tuple[int, str, str]] = []  # (slot, name, canonical)
+
+        for slot, name in (getattr(self, "_collector_gpu_names", None) or {}).items():
+            profile = resolve_or_default(name)
+            if profile.confidence == "extrapolated" and cal.get(slot) is None:
+                bad.append((slot, name, profile.canonical_name))
+
+        if not bad:
+            return True
+
+        _c = _Console(stderr=True)
+        gpu_lines = "\n".join(
+            f"  GPU {slot}: {name}  →  profile={canonical}  (extrapolated, uncalibrated)"
+            for slot, name, canonical in bad
+        )
+        _c.print()
+        _c.print(_Panel(
+            f"  [bold red]Theta cannot start — hardware calibration required.[/]\n\n"
+            f"  The following GPU(s) use extrapolated R_θ thresholds, not measured ones.\n"
+            f"  Running with T4 defaults on these GPUs will systematically misclassify\n"
+            f"  healthy nodes as anomalous (and vice versa):\n\n"
+            f"{gpu_lines}\n\n"
+            f"  [bold yellow]Fix:[/] run calibration once, then restart the daemon:\n\n"
+            f"  [bold green]theta calibrate --gpu 0[/]         "
+            f"[dim]# repeat for each GPU index[/]\n"
+            f"  [bold green]theta calibrate --ambient 22.0[/]  "
+            f"[dim]# if GPU is too busy to idle (DGX, AI Factory)[/]\n\n"
+            f"  [dim]Calibration takes ~60 seconds and writes to ~/.theta/calibration.json.\n"
+            f"  Use --calibration-file /etc/theta/calibration.json for shared service installs.[/]",
+            border_style="red",
+            title="[red]Calibration required[/]",
+            title_align="left",
+            padding=(1, 2),
+        ))
+        _c.print()
+        log.error(
+            "startup_blocked_uncalibrated",
+            gpus=[{"slot": s, "name": n, "profile": c} for s, n, c in bad],
+        )
+        return False
+
     def _reload_config(self) -> None:
         """Re-read ~/.theta/config.json and apply hot-reloadable fields.
 
@@ -785,6 +845,21 @@ class ThetaAgent:
                         slot=slot, name=name,
                         note="no hardware profile matched — using T4 defaults",
                     )
+
+            # Wire GPU names into the fleet correlator for NVLink topology detection
+            if self._collector_gpu_names:
+                self._correlator.register_gpu_names(self._collector_gpu_names)
+
+            # ── Pre-flight: block on un-calibrated extrapolated hardware ─────
+            # T4 profiles are measured (Stage 1 data). All other profiles are
+            # extrapolated — their thresholds are physics-based estimates, not
+            # measurements. Running on extrapolated thresholds without a prior
+            # `theta calibrate` run will produce systematic misclassification:
+            # a healthy B200 under full load reads R_θ ≈ 0.27 C/W but the T4
+            # fallback threshold is 0.87 — so it looks permanently IDLE to the
+            # classifier. Hard-block here rather than emit silently-wrong output.
+            if not self._check_hardware_ready():
+                return
 
             async for raw_sample in collector.stream():
                 if self._shutdown.is_set():

@@ -24,7 +24,23 @@ from typing import Optional
 
 from .safeio import atomic_write_text
 
-CALIBRATION_FILE = Path.home() / ".theta" / "calibration.json"
+def _default_calibration_file() -> Path:
+    """Resolve calibration file path.
+
+    Priority:
+      1. $THETA_CONFIG_DIR/calibration.json  — set by the systemd service unit
+         so the 'theta' service user finds the same file the operator calibrated
+         with (which may live in /etc/theta/).
+      2. ~/.theta/calibration.json           — single-user default.
+    """
+    import os
+    cfg_dir = os.environ.get("THETA_CONFIG_DIR")
+    if cfg_dir:
+        return Path(cfg_dir) / "calibration.json"
+    return Path.home() / ".theta" / "calibration.json"
+
+
+CALIBRATION_FILE = _default_calibration_file()
 
 # T4 Stage 1 reference points
 _T4_RTHETA_IDLE      = 1.28

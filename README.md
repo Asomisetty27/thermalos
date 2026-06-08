@@ -160,6 +160,66 @@ Mission Control ships only on Blackwell DGX/GB200. Theta runs on any NVIDIA GPU 
 
 ---
 
+## Production install (Linux service / DGX / AI Factory)
+
+For shared clusters where the daemon should run as a system service:
+
+```bash
+# Run once as root — creates 'theta' system user, venv, systemd unit
+sudo bash deploy/install.sh
+```
+
+Then calibrate **before** starting the daemon (required for non-T4 hardware):
+
+```bash
+# If the GPU has idle windows available:
+sudo -u theta /opt/theta/venv/bin/theta calibrate --gpu 0 \
+  --calibration-file /etc/theta/calibration.json
+
+# On always-busy DGX nodes (no idle windows):
+sudo -u theta /opt/theta/venv/bin/theta calibrate --gpu 0 \
+  --ambient <coolant_inlet_temp_c> \
+  --calibration-file /etc/theta/calibration.json
+
+# Repeat for each GPU index, then start the service:
+sudo systemctl enable --now theta
+sudo journalctl -u theta -f
+```
+
+**Why calibration is required:** The bundled classifier is trained on Tesla T4 Stage 1 data. On B200/H100/A100 the R_θ operating range is different — running without calibration will systematically misclassify healthy nodes as anomalous. `theta monitor` will refuse to start on detected non-T4 hardware until calibration exists.
+
+---
+
+## IT / Security review
+
+For system administrators evaluating whether to approve this deployment:
+
+**What Theta runs as:**  
+A Python daemon process under a dedicated system user (`theta`, no login shell). Requires membership in the `video` or `nvidia` group for NVML GPU access. Does not require root after install.
+
+**Ports opened:**
+
+| Port | Protocol | Purpose | Auth required |
+|------|----------|---------|--------------|
+| 9101 | TCP | Prometheus metrics scrape endpoint | None (read-only metrics) |
+| 9102 | TCP | Health API (causal state, maintenance scores) | Bearer token (`THETA_HEALTH_TOKEN` env var) |
+
+Both ports bind to `localhost` by default. To expose externally, set `bind_host` in config.
+
+**What data leaves the node:**  
+Opt-in telemetry only (off by default). When enabled, only aggregate anonymous statistics are uploaded: GPU model class, mean R_θ, ECC error rates, clock efficiency. **No** workload content, hostnames, IP addresses, job IDs, usernames, or model weights ever leave the node. Telemetry destination: Supabase hosted in US-East.
+
+**What it reads:**  
+NVML GPU telemetry (temperature, power, utilization, P-state, ECC counters, clock frequencies) via pynvml. Optionally: Redfish BMC inlet temperature (read-only, requires explicit credentials in config). No access to filesystem data, network traffic, job queues, or workload content.
+
+**Coexistence with DCGM:**  
+Safe to run alongside DCGM. Both read NVML; NVML is designed for concurrent access. Theta exports on port 9101, DCGM on 9400 — no collision. Theta metrics (`theta_gpu_*`) are additive to DCGM metrics, not duplicates.
+
+**Config file:**  
+`/etc/theta/` (production) or `~/.theta/` (single-user). Contains alert webhook URLs and optional BMC credentials (encrypted at rest with Fernet + PBKDF2).
+
+---
+
 ## Requirements
 
 - Python 3.10+

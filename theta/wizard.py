@@ -29,6 +29,14 @@ from rich import box
 
 from . import __version__
 
+
+# Sentinel exceptions for NVML error classification in step_system_check
+class _NVMLPermissionError(Exception):
+    pass
+
+class _NVMLDriverError(Exception):
+    pass
+
 CONFIG_PATH = Path.home() / ".theta" / "config.json"
 console = Console()
 
@@ -140,7 +148,18 @@ def step_system_check() -> dict:
         p.remove_task(t)
         try:
             import pynvml
-            pynvml.nvmlInit()
+            try:
+                pynvml.nvmlInit()
+            except Exception as nvml_err:
+                err_str = str(nvml_err).lower()
+                # Distinguish the three common failure modes so the operator
+                # gets an actionable message rather than a generic "demo mode".
+                if "permission" in err_str or "access denied" in err_str or "no permission" in err_str:
+                    raise _NVMLPermissionError(str(nvml_err))
+                elif "driver not loaded" in err_str or "not found" in err_str or "libcuda" in err_str:
+                    raise _NVMLDriverError(str(nvml_err))
+                else:
+                    raise
             n = pynvml.nvmlDeviceGetCount()
             driver = pynvml.nvmlSystemGetDriverVersion()
             pynvml.nvmlShutdown()
@@ -148,6 +167,37 @@ def step_system_check() -> dict:
             results["nvml"] = True
             results["n_gpus"] = n
             results["driver"] = driver
+        except _NVMLPermissionError:
+            import getpass as _gp, os as _os
+            user = _gp.getuser()
+            results["nvml"] = False
+            results["n_gpus"] = 4
+            results["demo"]   = True
+            results["nvml_block"] = "permission"
+            warn("NVML permission denied — your user cannot access the GPU driver.")
+            console.print(
+                f"  [dim]Fix: add your user to the [bold]video[/bold] group, then log out and back in:[/dim]\n"
+                f"  [bold {BLUE}]sudo usermod -aG video {user}[/]\n"
+                f"  [dim]On some DGX systems the group is [bold]nvidia[/bold] instead of [bold]video[/bold]:[/dim]\n"
+                f"  [bold {BLUE}]sudo usermod -aG nvidia {user}[/]\n"
+                f"  [dim]Running as root bypasses this: [bold]sudo theta setup[/bold][/dim]"
+            )
+        except _NVMLDriverError:
+            results["nvml"] = False
+            results["n_gpus"] = 4
+            results["demo"]   = True
+            results["nvml_block"] = "driver"
+            warn("NVIDIA driver not loaded — is this a GPU-equipped machine?")
+            console.print(
+                f"  [dim]If you have an NVIDIA GPU, check: [bold]nvidia-smi[/bold]\n"
+                f"  If the driver is installed but not loaded, try: [bold]sudo modprobe nvidia[/bold]\n"
+                f"  Theta will run in demo mode on this machine.[/dim]"
+            )
+        except ImportError:
+            warn("pynvml not installed — install it with: pip install nvidia-ml-py")
+            results["nvml"] = False
+            results["n_gpus"] = 4
+            results["demo"]   = True
         except Exception as e:
             warn(f"pynvml unavailable ({e}). Demo mode will be used.")
             results["nvml"] = False

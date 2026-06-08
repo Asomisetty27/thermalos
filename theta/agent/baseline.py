@@ -31,8 +31,15 @@ from typing import Optional
 from .hw_profiles import ThermalProfile, resolve_profile
 from .safeio import atomic_write_text
 
-BASELINE_DIR    = Path.home() / ".theta"
-BASELINE_FILE   = BASELINE_DIR / "baselines.json"
+def _default_baseline_file() -> Path:
+    import os
+    cfg_dir = os.environ.get("THETA_CONFIG_DIR")
+    if cfg_dir:
+        return Path(cfg_dir) / "baselines.json"
+    return Path.home() / ".theta" / "baselines.json"
+
+
+BASELINE_FILE = _default_baseline_file()
 
 IDLE_UTIL_MAX   = 5.0    # % GPU utilization — below = idle candidate
 IDLE_PSTATE_MIN = 4      # P-state ≥ P4 for idle candidacy
