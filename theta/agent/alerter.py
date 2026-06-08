@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from .metrics import AlertEvent, STATE_LABELS
 from .. import __version__
@@ -193,15 +195,75 @@ class FileAlerter(BaseAlerter):
             f.write(line + "\n")
 
 
+# ── Deduplication ─────────────────────────────────────────────────────────────
+
+class _AlertDeduper:
+    """Sliding-window deduplication keyed by (gpu_index, type, severity).
+
+    Audit finding addressed: a GPU oscillating UNDER_LOAD ↔ DRIFTING in 5s
+    ticks generated one webhook POST per transition — five per minute into
+    Slack. The router had no concept of "we just sent this exact alert."
+
+    Now: emit ONCE per unique (gpu_index, alert_type, severity) tuple per
+    `cooldown_sec` window. Subsequent duplicates are silently dropped and a
+    suppression count is attached to the eventual next emission.
+
+    Different alert types (drift vs ECC) on the same GPU are NOT deduped —
+    they're independent failure modes that may need independent action.
+    """
+
+    def __init__(self, cooldown_sec: float = 60.0):
+        self._cooldown_sec = cooldown_sec
+        # key → (last_emit_ts, suppressed_count_since_last_emit)
+        self._last_emit: dict[tuple, tuple[float, int]] = {}
+
+    @staticmethod
+    def _key(event: AlertEvent) -> tuple:
+        # Use the *severity tier* not the raw rtheta value — a drift alert at
+        # 2.5σ and 2.6σ should dedupe together, but a critical at 3.5σ should
+        # punch through a previous warning at 2.0σ.
+        return (
+            event.gpu_index,
+            event.alert_type if hasattr(event, "alert_type") else "unknown",
+            event.severity if hasattr(event, "severity") else "info",
+        )
+
+    def should_emit(self, event: AlertEvent, now: Optional[float] = None) -> tuple[bool, int]:
+        """Return (should_send, suppressed_count_so_far).
+
+        Caller can attach `suppressed_count` to the outgoing payload so
+        operators see "fired 8 times in the last minute" rather than getting
+        a single alert with no context.
+        """
+        t = now if now is not None else time.time()
+        k = self._key(event)
+        last, suppressed = self._last_emit.get(k, (0.0, 0))
+        if t - last < self._cooldown_sec:
+            self._last_emit[k] = (last, suppressed + 1)
+            return False, suppressed + 1
+        # Emit, reset suppression counter
+        prior_suppressed = suppressed
+        self._last_emit[k] = (t, 0)
+        return True, prior_suppressed
+
+
 # ── Router ────────────────────────────────────────────────────────────────────
 
 class AlertRouter:
     """
     Fan-out: send every AlertEvent to all registered alerters concurrently.
+
+    Now includes a deduplication layer to prevent alert storms when a GPU
+    oscillates near a threshold. Pass `cooldown_sec=0` to disable.
     """
 
-    def __init__(self, alerters: list[BaseAlerter] | None = None):
+    def __init__(
+        self,
+        alerters: list[BaseAlerter] | None = None,
+        cooldown_sec: float = 60.0,
+    ):
         self._alerters: list[BaseAlerter] = alerters or []
+        self._deduper = _AlertDeduper(cooldown_sec) if cooldown_sec > 0 else None
 
     def add(self, alerter: BaseAlerter) -> None:
         self._alerters.append(alerter)
@@ -209,6 +271,19 @@ class AlertRouter:
     async def route(self, event: AlertEvent) -> None:
         if not self._alerters:
             return
+        if self._deduper is not None:
+            should, suppressed = self._deduper.should_emit(event)
+            if not should:
+                return
+            # Attach the suppression count so the payload is self-describing.
+            # Touch only the context dict — don't mutate the event identity.
+            try:
+                if event.context is None:
+                    event.context = {}
+                if suppressed > 0:
+                    event.context["suppressed_duplicates"] = suppressed
+            except AttributeError:
+                pass
         await asyncio.gather(
             *(a.send(event) for a in self._alerters),
             return_exceptions=True,

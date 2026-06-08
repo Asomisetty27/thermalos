@@ -6,6 +6,16 @@ periods: P-state ≥ P6, util ≈ 0%, stable temperature for ≥ 30 seconds.
 
 Baseline is persisted to ~/.theta/baselines.json so the agent restores
 the virtual ambient on restart without a cold-start idle window requirement.
+
+COLD-START PRIORS: Until a real idle window is captured, T_ref is seeded
+from the hardware-class profile (hw_profiles.py) — NOT a flat 25 °C default.
+Downstream code can read `baseline.is_provisional` to know if the value is
+a profile seed (uncertain) vs a measured lock (high confidence).
+
+EXTERNAL OVERRIDE: When a BMC inlet-temperature reading is available
+(Redfish collector), the cold-start prior can be replaced with the actual
+chassis inlet — this is more accurate than any extrapolation. Use
+`set_external_ambient(gpu_index, t_c, source)` to do so.
 """
 
 from __future__ import annotations
@@ -14,9 +24,12 @@ import json
 import math
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from .hw_profiles import ThermalProfile, resolve_profile
+from .safeio import atomic_write_text
 
 BASELINE_DIR    = Path.home() / ".theta"
 BASELINE_FILE   = BASELINE_DIR / "baselines.json"
@@ -34,7 +47,18 @@ class Baseline:
     sigma:      float   # std dev of the idle window
     n_samples:  int
     locked_at:  float   # unix timestamp
-    source:     str     # "idle_window" | "manual" | "default"
+    # "idle_window"     — measured, hard-locked from stable idle
+    # "longrun_update"  — exponentially-smoothed update during brief idle
+    # "manual"          — operator set via theta calibrate / wizard
+    # "profile_prior"   — cold-start seed from hw_profiles (provisional)
+    # "external_bmc"    — Redfish chassis-inlet override (preferred prior)
+    source:     str
+    # Provisional baselines are NOT measured — downstream may want to widen
+    # alert thresholds until a real idle window arrives.
+    provisional: bool = False
+    # Uncertainty band (°C) — only meaningful for provisional sources.
+    # An external BMC reading has ~±1 °C; a profile prior has ~±3 °C.
+    uncertainty_c: float = 0.0
 
     def age_hours(self) -> float:
         return (time.time() - self.locked_at) / 3600
@@ -60,16 +84,39 @@ class BaselineManager:
             return
         try:
             raw = json.loads(self._file.read_text())
-            for entry in raw:
-                b = Baseline(**entry)
+        except json.JSONDecodeError:
+            # Corrupted file (probably a torn write from before atomic save
+            # was introduced). Quarantine it so the operator can inspect.
+            backup = self._file.with_suffix(".corrupt")
+            try:
+                self._file.rename(backup)
+            except OSError:
+                pass
+            return
+        except OSError:
+            return
+        # Tolerate forward-compatible fields (provisional, uncertainty_c)
+        # being missing in older saved files.
+        for entry in raw:
+            try:
+                b = Baseline(
+                    gpu_index     = entry["gpu_index"],
+                    t_ref         = entry["t_ref"],
+                    sigma         = entry.get("sigma", 0.0),
+                    n_samples     = entry.get("n_samples", 0),
+                    locked_at     = entry.get("locked_at", time.time()),
+                    source        = entry.get("source", "idle_window"),
+                    provisional   = entry.get("provisional", False),
+                    uncertainty_c = entry.get("uncertainty_c", 0.0),
+                )
                 self._baselines[b.gpu_index] = b
-        except Exception:
-            pass
+            except (KeyError, TypeError):
+                continue  # skip malformed entry, keep the rest
 
     def save(self) -> None:
-        self._file.parent.mkdir(parents=True, exist_ok=True)
+        """Atomic write — see safeio.atomic_write_text for the guarantee."""
         data = [asdict(b) for b in self._baselines.values()]
-        self._file.write_text(json.dumps(data, indent=2))
+        atomic_write_text(self._file, json.dumps(data, indent=2))
 
     # ── Update ────────────────────────────────────────────────────────────────
 
@@ -121,18 +168,96 @@ class BaselineManager:
 
     # ── Query ─────────────────────────────────────────────────────────────────
 
-    def get_t_ref(self, gpu_index: int) -> float:
-        """Return T_ref for this GPU, falling back to 25°C if not yet locked."""
+    def get_t_ref(self, gpu_index: int, gpu_name: str | None = None) -> float:
+        """Return T_ref for this GPU.
+
+        Priority (highest first):
+          1. Locked baseline (measured idle window or manual calibration)
+          2. Provisional baseline (BMC override or profile prior set earlier)
+          3. Hardware-class prior (resolved live from gpu_name)
+          4. 25 °C absolute fallback (logs a warning — should never hit this)
+
+        Cold-start fix: previous behavior unconditionally returned 25 °C
+        when no baseline was locked, which systematically biased R_θ in
+        hot-aisle (38 °C ambient) or cold-aisle (18 °C ambient) deployments.
+        Now we use the GPU-class profile's `expected_ambient_c` instead.
+        """
         b = self._baselines.get(gpu_index)
         if b is not None:
             return b.t_ref
-        return 25.0   # conservative default — will be replaced when idle window found
+        # No baseline yet — try the hardware profile prior
+        if gpu_name:
+            prof = resolve_profile(gpu_name)
+            if prof is not None:
+                return prof.expected_ambient_c
+        return 25.0   # absolute fallback for truly unknown hardware
+
+    def seed_from_profile(self, gpu_index: int, gpu_name: str, ts: float | None = None) -> bool:
+        """Install a provisional baseline from the hardware-class profile.
+
+        Returns True if a profile was found and applied. Idempotent — won't
+        overwrite a locked baseline. Use this on agent startup so downstream
+        code has a sensible T_ref before the first idle window arrives.
+        """
+        if gpu_index in self._baselines:
+            return False  # don't clobber an existing baseline
+        prof = resolve_profile(gpu_name)
+        if prof is None:
+            return False
+        self._baselines[gpu_index] = Baseline(
+            gpu_index    = gpu_index,
+            t_ref        = prof.expected_ambient_c,
+            sigma        = 0.0,
+            n_samples    = 0,
+            locked_at    = ts if ts is not None else time.time(),
+            source       = "profile_prior",
+            provisional  = True,
+            uncertainty_c = 3.0,   # hardware-class average has ~±3 °C spread
+        )
+        # Don't save() yet — let an idle window or BMC override upgrade this
+        # before we commit. Saving provisional values would be churn.
+        return True
+
+    def set_external_ambient(
+        self,
+        gpu_index: int,
+        t_c: float,
+        source: str = "external_bmc",
+        uncertainty_c: float = 1.0,
+        ts: float | None = None,
+    ) -> None:
+        """Override T_ref with a measured external ambient (e.g., BMC inlet).
+
+        This is the preferred cold-start prior when available — a BMC
+        Redfish reading is dramatically more accurate than any profile
+        extrapolation. Marked provisional so a real idle window can still
+        upgrade it (and downstream may still want to widen alert bands).
+        """
+        existing = self._baselines.get(gpu_index)
+        # Don't overwrite a hard-locked measurement with an external prior
+        if existing is not None and not existing.provisional:
+            return
+        self._baselines[gpu_index] = Baseline(
+            gpu_index    = gpu_index,
+            t_ref        = round(t_c, 2),
+            sigma        = 0.0,
+            n_samples    = 0,
+            locked_at    = ts if ts is not None else time.time(),
+            source       = source,
+            provisional  = True,
+            uncertainty_c = uncertainty_c,
+        )
 
     def get_baseline(self, gpu_index: int) -> Optional[Baseline]:
         return self._baselines.get(gpu_index)
 
     def has_baseline(self, gpu_index: int) -> bool:
         return gpu_index in self._baselines
+
+    def has_locked_baseline(self, gpu_index: int) -> bool:
+        """True only when baseline is a real measurement, not a provisional prior."""
+        b = self._baselines.get(gpu_index)
+        return b is not None and not b.provisional
 
     def maybe_update_longrun(
         self,

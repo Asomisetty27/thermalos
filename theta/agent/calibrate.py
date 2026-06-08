@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from .safeio import atomic_write_text
+
 CALIBRATION_FILE = Path.home() / ".theta" / "calibration.json"
 
 # T4 Stage 1 reference points
@@ -71,8 +73,8 @@ class CalibrationManager:
             pass
 
     def save(self) -> None:
-        self._file.parent.mkdir(parents=True, exist_ok=True)
-        self._file.write_text(json.dumps([asdict(c) for c in self._cals.values()], indent=2))
+        payload = json.dumps([asdict(c) for c in self._cals.values()], indent=2)
+        atomic_write_text(self._file, payload)
 
     def get(self, gpu_index: int) -> Optional[CalibrationResult]:
         return self._cals.get(gpu_index)

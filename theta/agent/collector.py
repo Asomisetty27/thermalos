@@ -43,11 +43,36 @@ class NVMLCollector:
                 process(sample)
     """
 
+    # HAL protocol: vendor identity for downstream module routing
+    vendor: str = "nvidia"
+
     def __init__(self, config: CollectorConfig):
         self.config  = config
         self._handles: list  = []
         self._n_gpus: int    = 0
         self._demo_mode: bool = not NVML_AVAILABLE
+        self._gpu_names: list[str] = []  # populated in _init_nvml
+        # Per-slot failure tracking for self-healing handle reinit
+        self._failure_counts: dict[int, int] = {}
+        self._failure_threshold: int = 3  # consecutive misses before reinit
+
+    @property
+    def gpu_count(self) -> int:
+        """HAL protocol: number of GPUs this collector is monitoring."""
+        return len(self._handles) if self._handles else self._n_gpus
+
+    @property
+    def gpu_names(self) -> list[str]:
+        """HAL protocol: friendly model names, indexed by slot.
+
+        In demo mode returns placeholder Tesla T4 names so hw_profiles
+        resolution still works through to the measured profile.
+        """
+        if self._gpu_names:
+            return list(self._gpu_names)
+        if self._demo_mode:
+            return ["Tesla T4"] * self._n_gpus
+        return ["unknown"] * self._n_gpus
 
     async def __aenter__(self) -> "NVMLCollector":
         await asyncio.to_thread(self._init_nvml)
@@ -74,6 +99,17 @@ class NVMLCollector:
         self._n_gpus = pynvml.nvmlDeviceGetCount()
         indices = self.config.gpu_indices or list(range(self._n_gpus))
         self._handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in indices]
+        # Populate GPU names for hw_profiles resolution downstream
+        names: list[str] = []
+        for h in self._handles:
+            try:
+                name = pynvml.nvmlDeviceGetName(h)
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8", errors="replace")
+                names.append(name)
+            except Exception:
+                names.append("unknown")
+        self._gpu_names = names
         log.info("NVML initialized", extra={"n_gpus": len(self._handles)})
 
     def _shutdown_nvml(self) -> None:
@@ -182,7 +218,15 @@ class NVMLCollector:
         )
 
     async def collect_all(self) -> list[RawSample]:
-        """Collect one sample from all monitored GPUs concurrently."""
+        """Collect one sample from all monitored GPUs concurrently.
+
+        Resilience: per-GPU collection failures are isolated — one bad
+        handle never drops the whole tick. After a configurable run of
+        consecutive failures on a single GPU, the handle is re-initialized
+        (NVMLError can be transient: driver reset, brief PCIe hang, etc.).
+        Re-init failures are logged but never raise — the GPU simply
+        remains absent from this tick's samples.
+        """
         if self._demo_mode:
             n = self.config.gpu_indices or list(range(self._n_gpus))
             return [self._collect_demo(i) for i in (n if isinstance(n, list) else range(n))]
@@ -193,12 +237,42 @@ class NVMLCollector:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         samples = []
-        for r in results:
+        for slot, r in enumerate(results):
             if isinstance(r, Exception):
-                log.error("collection error", exc_info=r)
+                # Per-GPU failure tracking — re-init the handle after N strikes
+                self._failure_counts[slot] = self._failure_counts.get(slot, 0) + 1
+                if self._failure_counts[slot] >= self._failure_threshold:
+                    log.warning(
+                        "collector reinit gpu=%d after %d consecutive failures: %s",
+                        slot, self._failure_counts[slot], r,
+                    )
+                    self._try_reinit_handle(slot)
+                else:
+                    log.error("collection error gpu=%d (%d/%d): %s",
+                              slot, self._failure_counts[slot],
+                              self._failure_threshold, r)
             else:
+                # Successful sample — reset the strike counter
+                if slot in self._failure_counts:
+                    del self._failure_counts[slot]
                 samples.append(r)
         return samples
+
+    def _try_reinit_handle(self, slot: int) -> None:
+        """Attempt to re-acquire a single GPU's NVML handle. Best-effort."""
+        try:
+            indices = self.config.gpu_indices or list(range(self._n_gpus))
+            if slot < len(indices):
+                new_handle = pynvml.nvmlDeviceGetHandleByIndex(indices[slot])
+                self._handles[slot] = new_handle
+                log.info("collector reinit gpu=%d successful", slot)
+                # Reset strike counter on successful reinit so we get another
+                # full window of attempts before giving up again.
+                self._failure_counts.pop(slot, None)
+        except Exception as exc:
+            log.error("collector reinit gpu=%d failed: %s", slot, exc)
+            # Don't reset counter — leave it pinned so we don't reinit-loop
+            # at 5s intervals. Operator restart will be needed if persistent.
 
     async def stream(self):
         """Yield batches of samples on every interval tick."""

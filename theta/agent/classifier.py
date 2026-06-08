@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
+from .hw_profiles import resolve_profile, ThermalProfile
 from .metrics import GPUState, CLASS_INDEX_TO_STATE
 from .window import WindowResult
 
@@ -25,7 +27,9 @@ BUNDLE_DIR = Path(__file__).parent.parent / "models" / "bundle"
 NB_MODEL_PATH = BUNDLE_DIR / "nb_steady_state.pkl"
 DT_MODEL_PATH = BUNDLE_DIR / "dt_steady_state.pkl"
 
-# T4 defaults — overridden per-GPU when calibration is present
+# T4 defaults — only used when (a) no calibration AND (b) no hardware profile
+# resolved from the GPU name. The hw_profiles registry is the preferred source
+# for thresholds, since it provides per-class values for A100/H100/B200/MI300X.
 _T4_LOAD_THRESHOLD = 0.87
 _T4_IDLE_THRESHOLD = 1.50
 
@@ -88,7 +92,44 @@ class StateClassifier:
         self._dt_model     = None
         self._mode         = "rules"
         self._calibration  = calibration  # Optional[CalibrationManager]
+        # Per-GPU profile cache: { gpu_index: ThermalProfile }
+        # Populated lazily as samples flow in (since GPU name is on the sample,
+        # not known at classifier construction time).
+        self._profiles: dict[int, ThermalProfile] = {}
         self._load_models()
+
+    def register_gpu(self, gpu_index: int, gpu_name: str) -> Optional[ThermalProfile]:
+        """Resolve and cache the hardware profile for this GPU.
+
+        Called once per GPU at daemon startup (or on first sample). Returns
+        the resolved profile so the caller can log what was matched (helpful
+        when a new model appears that doesn't match any known family).
+        """
+        prof = resolve_profile(gpu_name)
+        if prof is not None:
+            self._profiles[gpu_index] = prof
+        return prof
+
+    def _thresholds_for(self, gpu_index: int) -> tuple[float, float, str]:
+        """Resolve (load_threshold, idle_threshold, source) for a GPU.
+
+        Priority:
+          1. Locked calibration (theta calibrate has run on this unit)
+          2. Hardware-class profile (extrapolated from T4 measurements)
+          3. T4 defaults (when nothing else is known)
+        """
+        if self._calibration is not None:
+            cal = self._calibration.get(gpu_index)
+            if cal is not None:
+                return cal.load_threshold, cal.idle_threshold, "calibrated"
+        prof = self._profiles.get(gpu_index)
+        if prof is not None:
+            return (
+                prof.rtheta_load_threshold,
+                prof.rtheta_idle_threshold,
+                f"profile:{prof.family}",
+            )
+        return _T4_LOAD_THRESHOLD, _T4_IDLE_THRESHOLD, "t4_default"
 
     def _load_models(self) -> None:
         try:
@@ -124,17 +165,24 @@ class StateClassifier:
         In ensemble mode (no calibration): both models vote. Agreement boosts
         confidence by 5% (capped at 1.0). Disagreement caps confidence at 0.65.
         """
-        # Calibrated path — always rule-based with hardware-specific thresholds
-        if self._calibration is not None:
-            cal = self._calibration.get(window.gpu_index)
-            if cal is not None:
-                return _rule_classify(
-                    window.rtheta_mean,
-                    window.last_power,
-                    window.last_pstate,
-                    load_threshold=cal.load_threshold,
-                    idle_threshold=cal.idle_threshold,
-                )
+        # Hardware-aware rule path — when EITHER calibration OR a profile is
+        # available for this GPU, prefer rule-based classification with the
+        # right thresholds for this silicon, rather than running T4-trained
+        # ML models against (e.g.) an H100 R_theta distribution.
+        load_thr, idle_thr, src = self._thresholds_for(window.gpu_index)
+        if src != "t4_default":
+            state, conf = _rule_classify(
+                window.rtheta_mean,
+                window.last_power,
+                window.last_pstate,
+                load_threshold=load_thr,
+                idle_threshold=idle_thr,
+            )
+            # Discount confidence slightly when relying on a profile prior
+            # (not a real per-unit calibration). Calibrated wins lose nothing.
+            if src.startswith("profile:") and conf > 0.85:
+                conf = max(0.85, conf - 0.05)
+            return state, conf
 
         X = np.array([[
             window.rtheta_mean,

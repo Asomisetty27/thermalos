@@ -16,8 +16,11 @@ One pipeline runs for ALL GPUs concurrently (gather).
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import structlog
@@ -100,8 +103,12 @@ class ThetaAgent:
     """
 
     def __init__(self, config: AgentConfig):
-        self.config     = config
-        self._shutdown  = asyncio.Event()
+        self.config        = config
+        self._shutdown     = asyncio.Event()
+        # Hot-reload signal — set by SIGHUP, applied between samples
+        self._reload_event = asyncio.Event()
+        # Path the wizard wrote — used to source the reloaded config from disk
+        self._config_path  = Path.home() / ".theta" / "config.json"
 
         self._baseline     = BaselineManager()
         self._window       = SteadyStateWindow(config.window_sec, config.sigma_threshold)
@@ -122,6 +129,18 @@ class ThetaAgent:
         self._sdc_hunter     = SDCHunter(config.gpu_indices)
         self._fault_classifier = FaultCurveClassifier()
 
+        # ── Upgrade modules (audit-driven additions) ──
+        # Temporal Bayesian filter — smooths raw classifier output through a
+        # discrete-state HMM so single-tick noise stops flipping the alert state.
+        from .temporal_filter import TemporalStateFilter
+        self._temporal_filter = TemporalStateFilter()
+        # Per-GPU rolling utilization fraction for workload-intensity scoring
+        # (maintenance scorer reads it; populated in _process_sample).
+        self._utilization_history: dict[int, "deque[float]"] = {}
+        # Cache of last-known smoothed/causal/maintenance state per GPU for
+        # the /api/v1/agent/gpu/{i}/details endpoint.
+        self._agent_details_cache: dict[int, dict] = {}
+
         # Poll latency tracking — rolling mean per GPU (for health API + observability)
         self._poll_latency_ema: dict[int, float] = {}
         self._poll_latency_baseline: dict[int, float] = {}
@@ -139,12 +158,15 @@ class ThetaAgent:
         self._gpu_power: dict[int, float] = {}
 
         # Health API — exposes /api/v1/health for SLURM prolog / MPI integration
+        # and /api/v1/agent/* for the Agent Control Center site.
         self._health_api: Optional[HealthAPIServer] = None
         if config.health_api_port > 0:
             self._health_api = HealthAPIServer(
-                port             = config.health_api_port,
-                get_status       = self._health_status,
-                get_poll_latency = lambda: self._poll_latency_ema,
+                port              = config.health_api_port,
+                get_status        = self._health_status,
+                get_poll_latency  = lambda: self._poll_latency_ema,
+                get_agent_details = self._get_agent_details,
+                auth_token        = getattr(config, "health_api_token", None),
             )
         self._exporter     = PrometheusExporter(config.prometheus_port)
 
@@ -258,7 +280,19 @@ class ThetaAgent:
             return
 
         # 4. Classify (only on stable windows)
-        state, confidence = self._classifier.classify(window)
+        raw_state, raw_confidence = self._classifier.classify(window)
+
+        # 4b. Smooth through the temporal Bayesian filter — turns a per-tick
+        # observation into a posterior over states. We use the SMOOTHED state
+        # for state machine + alert routing, but keep the raw available for
+        # explainability ("classifier said X, filter says Y because...").
+        filtered = self._temporal_filter.observe(gpu, raw_state, raw_confidence)
+        state, confidence = filtered.state, filtered.confidence
+
+        # Track per-GPU utilization for the maintenance scorer (rolling fraction
+        # of time spent UNDER_LOAD over the last ~5 minutes of samples).
+        util_buf = self._utilization_history.setdefault(gpu, deque(maxlen=60))
+        util_buf.append(1.0 if state == GPUState.UNDER_LOAD else 0.0)
 
         classified = ClassifiedSample(
             enriched     = enriched,
@@ -300,6 +334,16 @@ class ThetaAgent:
         )
         if fault is not None:
             self._exporter.update_fault_diagnosis(fault)
+            # Populate the agent-details cache so the /api/v1/agent/gpu/{i}/details
+            # endpoint can serve rich state (causal explanation + maintenance score)
+            # to the site's Agent Control Center on every poll.
+            self._update_agent_details_cache(
+                gpu=gpu, ts=ts,
+                filtered=filtered, raw_state=raw_state, raw_confidence=raw_confidence,
+                fault=fault, window=window, drift=drift,
+                power_w=raw_sample.power_w, ecc_dbit=raw_sample.ecc_dbit,
+                inlet_temp_c=getattr(raw_sample, "inlet_temp_c", None),
+            )
             if fault.cause not in (FaultCause.NOMINAL, FaultCause.INSUFFICIENT_DATA):
                 fault_alert = AlertEvent(
                     gpu_index       = gpu,
@@ -425,12 +469,219 @@ class ThetaAgent:
             await self._router.route(fleet_alert)
             log.warning("fleet_event", affected=fleet_alert.context.get("fleet_gpus"))
 
+    def _update_agent_details_cache(
+        self, *, gpu: int, ts: float, filtered, raw_state, raw_confidence,
+        fault, window, drift, power_w: float, ecc_dbit: int,
+        inlet_temp_c: Optional[float] = None,
+    ) -> None:
+        """Compose causal + maintenance state for one GPU and cache it.
+
+        Cached values are read by `_get_agent_details()`, which the Health API
+        serves at /api/v1/agent/gpu/{i}/details. Composition runs once per
+        sample (not per request) so polling the API is essentially free.
+        """
+        from .causal import reason as causal_reason
+        from .maintenance import score as maintenance_score
+        from .hw_profiles import resolve_profile
+
+        # Resolve hardware profile for this GPU (cached in classifier already)
+        gpu_name = self._collector_gpu_names.get(gpu, "unknown") if hasattr(self, "_collector_gpu_names") else "unknown"
+        profile = resolve_profile(gpu_name)
+
+        # Top-K state hypotheses from the temporal filter
+        alternatives = self._temporal_filter.states_under_consideration(gpu, min_prob=0.05)
+
+        def _safe_float(x, fallback=0.0):
+            """Coerce optional metric to float; preserves None-as-zero semantics."""
+            try:
+                return float(x) if x is not None else fallback
+            except (TypeError, ValueError):
+                return fallback
+
+        # Causal explanation
+        try:
+            trend_slope = _safe_float(getattr(drift, "trend_slope", 0.0))
+            causal = causal_reason(
+                gpu_index=gpu,
+                smoothed_state=filtered.state,
+                state_confidence=filtered.confidence,
+                alternative_states=alternatives,
+                fault_cause=fault.cause,
+                fault_confidence=_safe_float(fault.confidence),
+                rtheta_current=_safe_float(window.rtheta_mean),
+                rtheta_baseline=_safe_float(drift.baseline_mean),
+                rtheta_k_sigma=_safe_float(drift.sigma_score),
+                rtheta_trend_per_min=trend_slope * 60.0,
+                eta_to_threshold_sec=getattr(drift, "eta_seconds", None),
+                ecc_dbit_any=ecc_dbit > 0,
+                micro_throttle=False,
+                correlated_gpus=(),
+            )
+            causal_dict = causal.as_dict()
+        except Exception as exc:
+            log.error("causal_reason_failed", gpu=gpu, error=str(exc))
+            causal_dict = None
+
+        # Maintenance score
+        try:
+            util_history = self._utilization_history.get(gpu)
+            workload_intensity = (
+                sum(util_history) / len(util_history) if util_history else 0.0
+            )
+            aging_per_month = max(0.0, _safe_float(getattr(drift, "trend_slope", 0.0))) * 86400 * 30
+            service_threshold = (
+                profile.rtheta_load_threshold if profile else self.config.k_warn * 0.05
+            )
+            maint = maintenance_score(
+                gpu_index=gpu,
+                profile=profile,
+                rtheta_aging_rate_per_month=aging_per_month,
+                rtheta_current=_safe_float(window.rtheta_mean),
+                rtheta_baseline=_safe_float(drift.baseline_mean),
+                rtheta_service_threshold=service_threshold,
+                ecc_sbit_per_hour=_safe_float(
+                    getattr(self._ecc_monitor, "rate_per_hour", lambda g: 0.0)(gpu)
+                    if hasattr(self._ecc_monitor, "rate_per_hour") else 0.0
+                ),
+                workload_intensity=workload_intensity,
+                inlet_temp_c=inlet_temp_c,
+            )
+            maint_dict = maint.as_dict()
+        except Exception as exc:
+            log.error("maintenance_score_failed", gpu=gpu, error=str(exc))
+            maint_dict = None
+
+        def _state_name(s):
+            """Serialize GPUState as a stable human-readable label.
+
+            GPUState's value happens to be an int (sklearn class index), so
+            we use the enum's `.name` for JSON — much more useful for an
+            operator reading the response than a magic number.
+            """
+            return s.name.lower() if hasattr(s, "name") else str(s)
+
+        self._agent_details_cache[gpu] = {
+            "gpu_index": gpu,
+            "timestamp": ts,
+            "smoothed_state": {
+                "state": _state_name(filtered.state),
+                "confidence": round(filtered.confidence, 4),
+                "n_observations": filtered.n_observations,
+                "posterior": {
+                    _state_name(s): round(p, 4)
+                    for s, p in filtered.posterior.items()
+                },
+            },
+            "raw_classifier": {
+                "state": _state_name(raw_state),
+                "confidence": round(raw_confidence, 4),
+            },
+            "fault": {
+                "cause": fault.cause.value,
+                "confidence": round(fault.confidence, 3),
+                "intercept": fault.intercept,
+                "gap": fault.gap,
+                "remediation": fault.remediation,
+            },
+            "causal_explanation": causal_dict,
+            "maintenance": maint_dict,
+            "hw_profile": {
+                "canonical_name": profile.canonical_name,
+                "vendor": profile.vendor,
+                "cooling": profile.cooling,
+                "confidence": profile.confidence,
+            } if profile else None,
+        }
+
+    def _get_agent_details(self, gpu_index: int) -> Optional[dict]:
+        """Health API callback: return cached rich state for one GPU."""
+        return self._agent_details_cache.get(gpu_index)
+
+    def _reload_config(self) -> None:
+        """Re-read ~/.theta/config.json and apply hot-reloadable fields.
+
+        Hot-reloadable: alert thresholds (k_warn, k_critical), webhook URL,
+        prometheus settings, telemetry opt-in. NOT hot-reloadable: GPU
+        indices, interval_sec, prometheus_port, classifier mode — these
+        require module re-init and would lose in-memory state, so changes
+        only take effect on full agent restart.
+        """
+        try:
+            if not self._config_path.exists():
+                log.warning("config_reload_skipped", reason="config_file_missing")
+                return
+            raw = json.loads(self._config_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.error("config_reload_failed", error=str(exc))
+            return
+
+        applied: list[str] = []
+
+        # Drift thresholds — pushed into the detector at runtime
+        k_warn = raw.get("k_warn")
+        if isinstance(k_warn, (int, float)) and k_warn != self.config.k_warn:
+            self.config.k_warn = float(k_warn)
+            if hasattr(self._detector, "k_warn"):
+                self._detector.k_warn = float(k_warn)
+            applied.append(f"k_warn={k_warn}")
+
+        k_crit = raw.get("k_critical")
+        if isinstance(k_crit, (int, float)) and k_crit != self.config.k_critical:
+            self.config.k_critical = float(k_crit)
+            if hasattr(self._detector, "k_critical"):
+                self._detector.k_critical = float(k_crit)
+            applied.append(f"k_critical={k_crit}")
+
+        # Webhook URL — re-create the router so new URL takes effect on next alert
+        new_url = raw.get("webhook_url")
+        if new_url != self.config.webhook_url:
+            self.config.webhook_url = new_url
+            try:
+                # Lazy import here to avoid circular at module load
+                from .alerter import AlertRouter
+                self._router = AlertRouter(
+                    webhook_url   = new_url,
+                    alert_log_path = self.config.alert_log_path,
+                )
+                applied.append("webhook_url updated")
+            except Exception as exc:
+                log.error("webhook_reload_failed", error=str(exc))
+
+        # Telemetry opt-in — only honors flipping ON; flipping OFF would
+        # require flushing in-flight batches, which isn't safe mid-run.
+        new_opt_in = raw.get("data_sharing")
+        if new_opt_in is True and not self.config.data_sharing:
+            self.config.data_sharing = True
+            if hasattr(self, "_telemetry"):
+                try:
+                    self._telemetry.enable()
+                    applied.append("telemetry_enabled")
+                except Exception as exc:
+                    log.error("telemetry_enable_failed", error=str(exc))
+
+        if applied:
+            log.info("config_reloaded", changes=applied)
+        else:
+            log.info("config_reloaded", changes="no_op_no_changes_detected")
+
     async def run(self) -> None:
         """Main loop. Blocks until shutdown signal received."""
         loop = asyncio.get_running_loop()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown.set)
+
+        # SIGHUP triggers config hot-reload — operators can re-tune thresholds
+        # (k_warn, k_critical, webhook URL) without restarting the daemon and
+        # losing all in-memory baselines, drift buffers, and IsolationForest
+        # models. The handler sets a flag; the main loop applies it between
+        # samples so we never reload mid-classification.
+        try:
+            loop.add_signal_handler(signal.SIGHUP, self._reload_event.set)
+        except (AttributeError, NotImplementedError):
+            # SIGHUP unavailable (Windows, or signal not implemented on this
+            # event loop) — silently skip; hot-reload simply unsupported.
+            pass
 
         if self.config.enable_prometheus:
             self._exporter.start_server()
@@ -456,10 +707,53 @@ class ThetaAgent:
             prometheus_port=self.config.prometheus_port if self.config.enable_prometheus else None,
         )
 
-        async with NVMLCollector(collector_config) as collector:
+        # Select the appropriate collector for this host's hardware (HAL).
+        # Defaults to NVIDIA via NVMLCollector when pynvml works; falls back
+        # to demo mode on hosts without a GPU driver. AMD ROCm path is
+        # stubbed — will activate once pyrsmi is installed AND the
+        # ROCmCollector implementation lands.
+        from .hal import select_collector
+        async with select_collector(collector_config) as collector:
+            # Cache GPU names on `self` so _update_agent_details_cache can
+            # resolve hw_profiles per GPU.
+            try:
+                self._collector_gpu_names = {
+                    i: name for i, name in enumerate(collector.gpu_names)
+                }
+            except Exception:
+                self._collector_gpu_names = {}
+
+            # Register each GPU with the classifier so it picks the right
+            # threshold tier from hw_profiles instead of falling back to T4
+            # defaults — fixes silent misclassification on H100/B200/MI300X.
+            # Also seed baseline with the profile's expected ambient so the
+            # first R_θ computations aren't biased by a flat 25°C assumption.
+            for slot, name in self._collector_gpu_names.items():
+                profile = self._classifier.register_gpu(slot, name)
+                if profile is not None:
+                    self._baseline.seed_from_profile(slot, name)
+                    log.info(
+                        "gpu_registered",
+                        slot=slot, name=name,
+                        family=profile.family, vendor=profile.vendor,
+                        load_threshold=profile.rtheta_load_threshold,
+                        cooling=profile.cooling,
+                    )
+                else:
+                    log.warning(
+                        "gpu_unprofiled",
+                        slot=slot, name=name,
+                        note="no hardware profile matched — using T4 defaults",
+                    )
+
             async for raw_sample in collector.stream():
                 if self._shutdown.is_set():
                     break
+                if self._reload_event.is_set():
+                    # Apply pending config reload between samples — never
+                    # mid-classification, so in-memory state stays coherent.
+                    self._reload_event.clear()
+                    self._reload_config()
                 try:
                     await self._process_sample(raw_sample)
                     self._tick_count += 1

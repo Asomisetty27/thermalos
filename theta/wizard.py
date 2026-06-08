@@ -42,12 +42,12 @@ TEXT   = "#E8E8F0"
 
 # ── Logo ──────────────────────────────────────────────────────────────────────
 LOGO = r"""
-  ████████╗██╗  ██╗███████╗██████╗ ███╗   ███╗ █████╗ ██╗      ██████╗ ███████╗
-  ╚══██╔══╝██║  ██║██╔════╝██╔══██╗████╗ ████║██╔══██╗██║     ██╔═══██╗██╔════╝
-     ██║   ███████║█████╗  ██████╔╝██╔████╔██║███████║██║     ██║   ██║███████╗
-     ██║   ██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══██║██║     ██║   ██║╚════██║
-     ██║   ██║  ██║███████╗██║  ██║██║ ╚═╝ ██║██║  ██║███████╗╚██████╔╝███████║
-     ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚══════╝
+        ████████╗██╗  ██╗███████╗████████╗ █████╗
+        ╚══██╔══╝██║  ██║██╔════╝╚══██╔══╝██╔══██╗
+           ██║   ███████║█████╗     ██║   ███████║
+           ██║   ██╔══██║██╔══╝     ██║   ██╔══██║
+           ██║   ██║  ██║███████╗   ██║   ██║  ██║
+           ╚═╝   ╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝
 """
 
 # ── Step indicator ─────────────────────────────────────────────────────────────
@@ -644,8 +644,21 @@ def step_finish(sys_info: dict, gpus: list[dict], baselines: dict, alert_cfg: di
         "redfish_password":  redfish_cfg.get("redfish_password"),
     }
 
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    # Encrypt credentials at rest — Redfish BMC password is sensitive
+    # (chassis-level access), so it gets wrapped with a host-bound key
+    # before hitting disk. Webhook URLs often contain auth tokens too.
+    # See theta/agent/secrets.py for the threat model.
+    try:
+        from theta.agent.secrets import migrate_config_secrets
+        migrate_config_secrets(config, [
+            ("redfish_password",),
+            ("webhook_url",),
+        ])
+    except Exception as exc:
+        warn(f"Credential encryption skipped ({exc}) — values stored as plaintext.")
+
+    from theta.agent.safeio import atomic_write_text
+    atomic_write_text(CONFIG_PATH, json.dumps(config, indent=2))
     ok(f"Config saved: {CONFIG_PATH}")
 
     console.print()
