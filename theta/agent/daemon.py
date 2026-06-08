@@ -134,6 +134,12 @@ class ThetaAgent:
         # discrete-state HMM so single-tick noise stops flipping the alert state.
         from .temporal_filter import TemporalStateFilter
         self._temporal_filter = TemporalStateFilter()
+        # Cascading-1D-CNN predictor — augments the rule-based FailurePredictor
+        # when trained weights are available. Architecture per Cai et al. 2026
+        # (PRAUC 0.90). Silent no-op when torch/weights absent — daemon falls
+        # back transparently to the rule-based predictor.
+        from .predictor_cnn import CascadingCNNPredictor
+        self._cnn_predictor = CascadingCNNPredictor()
         # Per-GPU rolling utilization fraction for workload-intensity scoring
         # (maintenance scorer reads it; populated in _process_sample).
         self._utilization_history: dict[int, "deque[float]"] = {}
@@ -293,6 +299,21 @@ class ThetaAgent:
         # of time spent UNDER_LOAD over the last ~5 minutes of samples).
         util_buf = self._utilization_history.setdefault(gpu, deque(maxlen=60))
         util_buf.append(1.0 if state == GPUState.UNDER_LOAD else 0.0)
+
+        # Feed CNN predictor buffer — silently ignored when no model loaded.
+        # We push every stable window so the model has a continuous time series
+        # to convolve over (not just alert-time spot checks).
+        sm_max_for_cnn = raw_sample.sm_clock_max_mhz
+        clock_eff_for_cnn = (
+            raw_sample.clock_sm_mhz / sm_max_for_cnn if sm_max_for_cnn else 0.0
+        )
+        self._cnn_predictor.update(gpu, ts, {
+            "rtheta":    enriched.rtheta or 0.0,
+            "power_w":   raw_sample.power_w,
+            "temp_c":    raw_sample.temp_junction,
+            "util_pct":  raw_sample.util_pct,
+            "clock_eff": clock_eff_for_cnn,
+        })
 
         classified = ClassifiedSample(
             enriched     = enriched,
@@ -560,9 +581,28 @@ class ThetaAgent:
             """
             return s.name.lower() if hasattr(s, "name") else str(s)
 
+        # CNN prediction (None when no weights loaded — site can see this and
+        # display a "trained model not deployed" badge in the Reasoning tab).
+        cnn_pred_dict = None
+        if self._cnn_predictor.is_ready:
+            try:
+                cnn = self._cnn_predictor.predict(gpu, ts)
+                if cnn is not None:
+                    cnn_pred_dict = {
+                        "p_failure_by_horizon": {
+                            str(h): round(p, 4)
+                            for h, p in cnn.p_failure_by_horizon.items()
+                        },
+                        "model_confidence": round(cnn.model_confidence, 3),
+                        "alert_level": cnn.horizon_alert_level(),
+                    }
+            except Exception as exc:
+                log.warning("cnn_predict_failed", gpu=gpu, error=str(exc))
+
         self._agent_details_cache[gpu] = {
             "gpu_index": gpu,
             "timestamp": ts,
+            "cnn_prediction": cnn_pred_dict,
             "smoothed_state": {
                 "state": _state_name(filtered.state),
                 "confidence": round(filtered.confidence, 4),
