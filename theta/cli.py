@@ -3,6 +3,7 @@ Theta CLI — theta <command>
 
 Commands:
   setup       Interactive setup wizard (run this first)
+  status      Quick health check — shows GPU R_theta + daemon state in < 1s
   monitor     Run the monitoring agent (blocks)
   baseline    Run a baseline-only idle window scan
   calibrate   Measure hardware-specific R_theta thresholds (run once on non-T4 GPUs)
@@ -64,6 +65,110 @@ def setup():
     """Interactive setup wizard. Run this first. (~90 seconds)"""
     from .wizard import run_wizard
     run_wizard()
+
+
+# ── status ────────────────────────────────────────────────────────────────────
+
+@app.command()
+def status(
+    port: int = typer.Option(9102, "--port", "-p", help="Health API port (default: 9102)"),
+):
+    """
+    Quick health check — shows all GPUs + daemon state in under a second.
+
+    Tries the running daemon's health API first (instant). Falls back to a
+    direct NVML snapshot if the daemon is not running.
+    """
+    import urllib.request
+    import urllib.error
+
+    # ── Try live daemon first ─────────────────────────────────────────────────
+    daemon_live = False
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/api/v1/health", timeout=1.0
+        ) as resp:
+            data = json.loads(resp.read())
+        daemon_live = True
+    except Exception:
+        data = None
+
+    t = Table(box=box.SIMPLE_HEAVY, show_header=True, expand=False)
+    t.add_column("GPU",      style="bold", no_wrap=True)
+    t.add_column("State",    no_wrap=True)
+    t.add_column("R_θ C/W",  justify="right", no_wrap=True)
+    t.add_column("Risk",     justify="right", no_wrap=True)
+    t.add_column("Action",   no_wrap=True)
+
+    _state_color = {
+        "under_load": "green", "clean_idle": "blue",
+        "drifting": "yellow", "critical": "red",
+        "zombie_recovery": "red", "child_exit_recovery": "yellow",
+        "unknown": "dim",
+    }
+    _rec_color = {"ok": "green", "watch": "yellow", "drain": "red", "evacuate": "red"}
+
+    if daemon_live and data:
+        for idx_str, gpu in sorted(data.get("gpus", {}).items(), key=lambda x: int(x[0])):
+            state = gpu.get("state", "unknown")
+            rtheta = gpu.get("rtheta")
+            risk   = gpu.get("risk", 0.0)
+            rec    = gpu.get("recommendation", "ok")
+            color  = _state_color.get(state, "white")
+            rcol   = _rec_color.get(rec, "white")
+            t.add_row(
+                f"GPU {idx_str}",
+                f"[{color}]{state}[/{color}]",
+                f"{rtheta:.4f}" if rtheta is not None else "—",
+                f"{risk:.2f}",
+                f"[{rcol}]{rec}[/{rcol}]",
+            )
+        uptime = data.get("uptime_ticks", "?")
+        alerts = data.get("alerts", 0)
+        console.print(
+            f"[bold green]Theta v{__version__}[/bold green]  "
+            f"[dim]daemon live · port {port} · "
+            f"uptime {uptime} ticks · {alerts} alert(s)[/dim]"
+        )
+        console.print(t)
+        return
+
+    # ── Daemon not running — direct NVML snapshot ────────────────────────────
+    console.print(
+        f"[bold green]Theta v{__version__}[/bold green]  "
+        f"[dim]daemon not running · direct NVML read[/dim]"
+    )
+    try:
+        import pynvml as nv
+        nv.nvmlInit()
+        n = nv.nvmlDeviceGetCount()
+        for i in range(n):
+            h    = nv.nvmlDeviceGetHandleByIndex(i)
+            name = nv.nvmlDeviceGetName(h)
+            name = name.decode() if isinstance(name, bytes) else name
+            temp = nv.nvmlDeviceGetTemperature(h, nv.NVML_TEMPERATURE_GPU)
+            pw   = nv.nvmlDeviceGetPowerUsage(h) / 1000.0
+            util = nv.nvmlDeviceGetUtilizationRates(h).gpu
+            ps   = nv.nvmlDeviceGetPerformanceState(h)
+            rtheta_str = "—  (no baseline)"
+            if pw > 10:
+                pass  # can't compute R_theta without T_ref — show raw readings only
+            t.add_row(
+                f"GPU {i}  [dim]{name}[/dim]",
+                f"P{ps}  util={util}%",
+                rtheta_str,
+                "—",
+                "[dim]run theta setup[/dim]" if not _saved_config() else "[dim]run theta monitor[/dim]",
+            )
+        nv.nvmlShutdown()
+        console.print(t)
+        console.print(
+            "\n[dim]R_θ requires a running daemon with a locked baseline. "
+            "Start with: [bold]theta setup[/bold] then [bold]theta monitor[/bold][/dim]"
+        )
+    except Exception as e:
+        console.print(f"[red]NVML error:[/red] {e}")
+        console.print("[dim]Is the NVIDIA driver installed? Try: nvidia-smi[/dim]")
 
 
 # ── monitor ───────────────────────────────────────────────────────────────────
