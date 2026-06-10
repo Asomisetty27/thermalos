@@ -8,6 +8,7 @@ This is the foundational Theta metric. No other tool computes it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
@@ -135,14 +136,20 @@ def compute_rtheta(
     Compute R_theta_eff = (T_junction - T_ref) / P_GPU.
 
     Returns (rtheta, valid). valid=False when power is too low for a
-    reliable estimate — caller should skip classification but still record.
+    reliable estimate, or any input is non-finite — caller should skip
+    classification but still record.
     """
+    if not (math.isfinite(temp_junction) and math.isfinite(t_ref) and math.isfinite(power_w)):
+        return None, False
     if power_w < MIN_POWER_W:
         return None, False
     delta_t = temp_junction - t_ref
     if delta_t < MIN_DELTA_T:
         return None, False
-    return delta_t / power_w, True
+    rtheta = delta_t / power_w
+    if not math.isfinite(rtheta):
+        return None, False
+    return rtheta, True
 
 
 def enrich(sample: RawSample, t_ref: float) -> EnrichedSample:

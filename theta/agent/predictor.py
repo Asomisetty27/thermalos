@@ -21,7 +21,6 @@ mean "we are fairly confident something is wrong," not "we saw one bad reading."
 
 from __future__ import annotations
 
-import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -119,12 +118,22 @@ class FailurePredictor:
             contributions.append((W_ECC_DBIT, "uncorrectable ECC errors in last 5 windows"))
 
         # ── ECC single-bit rate ───────────────────────────────────────────────
-        sbit_rates = np.array([r.ecc_sbit for r in records], dtype=float)
-        sbit_slope = float(np.polyfit(ts_norm, sbit_rates, 1)[0]) if n >= 5 else 0.0
-        sbit_rate_now = sbit_rates[-1]
-        if sbit_slope > 0.001 or sbit_rate_now > 5:
-            norm = min(1.0, (sbit_slope * 3600 + sbit_rate_now) / 20.0)
-            contributions.append((W_ECC_SBIT_RATE * norm, f"sbit rate={sbit_rate_now:.0f}/hr, slope={sbit_slope*3600:.2f}/hr²"))
+        # ecc_sbit is a cumulative volatile counter (resets on driver reload),
+        # not a per-window rate. sbit_slope (errors/sec, scaled to /hr below)
+        # is the actual rate of new errors; sbit_count_now is the raw running
+        # total. These are different quantities — adding them (as before)
+        # let a large historical count permanently saturate the score even
+        # after the error rate returned to zero. Score each on its own scale
+        # and take the max.
+        sbit_counts = np.array([r.ecc_sbit for r in records], dtype=float)
+        sbit_slope  = float(np.polyfit(ts_norm, sbit_counts, 1)[0]) if n >= 5 else 0.0
+        sbit_rate_per_hr = max(0.0, sbit_slope * 3600)
+        sbit_count_now   = sbit_counts[-1]
+        if sbit_rate_per_hr > 0.05 or sbit_count_now > 5:
+            rate_norm  = min(1.0, sbit_rate_per_hr / 20.0)   # 20 errors/hr = severe
+            count_norm = min(1.0, sbit_count_now / 100.0)    # 100 cumulative = severe
+            norm = max(rate_norm, count_norm)
+            contributions.append((W_ECC_SBIT_RATE * norm, f"sbit cumulative={sbit_count_now:.0f}, rate={sbit_rate_per_hr:.2f}/hr"))
 
         # ── R_theta slope ─────────────────────────────────────────────────────
         rthetas = [r.rtheta for r in records if r.rtheta is not None]
@@ -163,9 +172,18 @@ class FailurePredictor:
                 explanation="no degradation signals", alert_worthy=False
             )
 
-        # Combine signals: score = 1 - product(1 - w_i)  (any strong signal drives high score)
-        raw_weights = [w for w, _ in contributions]
-        score = 1.0 - math.prod(1.0 - min(w, 0.999) for w in raw_weights)
+        # Combine signals. Noisy-OR (1 - prod(1-w_i)) treats every signal as
+        # independent evidence — but R_θ slope, drift sigma, and clock
+        # efficiency are largely downstream of the same physical cause
+        # (cooling-path degradation), so noisy-OR double-counts correlated
+        # evidence and inflates the score. Instead: the strongest signal sets
+        # the floor, and each additional signal closes a diminishing fraction
+        # of the remaining headroom — corroborating evidence raises
+        # confidence without compounding as if each signal were independent.
+        raw_weights = sorted((min(w, 0.999) for w, _ in contributions), reverse=True)
+        score = raw_weights[0]
+        for w in raw_weights[1:]:
+            score += w * (1.0 - score) * 0.5
         score = min(1.0, score)
 
         explanation_parts = [desc for _, desc in sorted(contributions, key=lambda x: -x[0])]

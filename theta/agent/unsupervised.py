@@ -33,7 +33,14 @@ FEATURE_DIM = 5
 MIN_SAMPLES_TO_ACTIVATE = 60     # won't score until we've seen 60 healthy windows
 RETRAIN_EVERY_N         = 30     # retrain IF every N new healthy samples
 MAX_BASELINE_SAMPLES    = 500    # rolling buffer cap
-IF_CONTAMINATION        = 0.05   # expected fraction of anomalies in healthy data
+# The training buffer is fed *only* confirmed-healthy windows (update_healthy),
+# so contamination should reflect noise within "healthy," not a general
+# anomaly rate. At 0.05, predict() alone flags ~5% of in-distribution windows
+# as anomalous — with a 5-min cooldown that's a steady trickle of false
+# critic alerts. 0.01 keeps predict() conservative; the z-score check
+# (score() below, |z| > 2.5 ≈ 0.6% under normality) remains the primary
+# out-of-distribution signal for genuine drift.
+IF_CONTAMINATION        = 0.01   # expected fraction of anomalies in healthy data
 IF_N_ESTIMATORS         = 100
 ALERT_COOLDOWN_S        = 300    # 5 min between critic alerts per GPU
 

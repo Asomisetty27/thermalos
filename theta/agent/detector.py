@@ -12,8 +12,10 @@ This is the "drift detection, not thresholds" capability (bento card 01).
 from __future__ import annotations
 
 import math
+import statistics
 from collections import deque
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Optional
 
 from .metrics import GPUState
@@ -29,6 +31,26 @@ SUSTAINED_WINDOWS    = 3   # consecutive anomalous windows before alerting
 TREND_WINDOW         = 30   # samples for linear regression
 PREDICT_HORIZON_S    = 300  # 5 min — warn if threshold crossing within this window
 PREDICT_COOLDOWN_S   = 120  # seconds between repeated predictive warnings per GPU
+
+
+def _theil_sen_slope(xs: list[float], ys: list[float]) -> Optional[float]:
+    """
+    Robust slope estimate: median of all pairwise slopes between points.
+
+    A single transient spike (a brief power excursion, a noisy NVML read)
+    can swing an OLS fit (np.polyfit) enough to trigger or suppress a
+    predictive alert. The median of pairwise slopes is unmoved unless a
+    majority of points shift — exactly the "sustained trend, not a blip"
+    distinction this detector is meant to make.
+
+    Returns None if every pair has dx ~ 0 (e.g. duplicate timestamps).
+    """
+    slopes = [
+        (y2 - y1) / (x2 - x1)
+        for (x1, y1), (x2, y2) in combinations(zip(xs, ys), 2)
+        if abs(x2 - x1) > 1e-9
+    ]
+    return statistics.median(slopes) if slopes else None
 
 
 @dataclass
@@ -140,16 +162,20 @@ class DriftDetector:
 
         tbuf = self._trend_buffers[gpu_index]
         if len(tbuf) >= 10 and not is_drifting and not is_critical:
-            import numpy as np
-            xs = np.array([t for t, _ in tbuf], dtype=float)
-            ys = np.array([r for _, r in tbuf], dtype=float)
-            xs -= xs[0]   # normalize to zero-start
-            slope, intercept = np.polyfit(xs, ys, 1)
-            trend_slope = float(slope)
+            xs = [t for t, _ in tbuf]
+            ys = [r for _, r in tbuf]
+            x0 = xs[0]
+            xs_norm = [x - x0 for x in xs]   # normalize to zero-start
 
-            if slope > 0:
+            slope = _theil_sen_slope(xs_norm, ys)
+            trend_slope = slope
+
+            if slope is not None and slope > 0:
+                # Robust intercept (Theil-Sen): line of this slope through
+                # the median point, rather than the OLS intercept.
+                intercept = statistics.median(ys) - slope * statistics.median(xs_norm)
                 warn_threshold = mean + self._k_warn * std
-                t_elapsed = float(xs[-1])
+                t_elapsed = xs_norm[-1]
                 predicted_now = slope * t_elapsed + intercept
                 if predicted_now < warn_threshold:
                     eta = (warn_threshold - predicted_now) / slope

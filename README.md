@@ -156,7 +156,7 @@ Every alert includes full forensic context:
 | Serves neocloud / mixed fleets | ✓ | ✗ | ✗ | **✓** |
 | Open-source agent | ✓ | ✗ | ✗ | **✓** |
 
-Mission Control ships only on Blackwell DGX/GB200. Theta runs on any NVIDIA GPU reachable by pynvml.
+Mission Control requires Base Command Manager (BCM) + DGX SuperPOD/BasePOD topology — it supports A100/H100/H200/B200 but only on NVIDIA's own orchestration stack. Theta runs on any NVIDIA GPU reachable by pynvml, regardless of orchestration layer.
 
 ---
 
