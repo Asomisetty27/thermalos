@@ -97,6 +97,10 @@ def _observation_likelihood(observed_state: GPUState, conf: float) -> list[float
     """
     n = len(_STATES)
     obs_idx = _STATE_IDX.get(observed_state, _STATE_IDX[GPUState.UNKNOWN])
+    # Guard: a NaN/Inf confidence would otherwise propagate through the
+    # posterior multiply-normalize and poison every subsequent tick.
+    if not math.isfinite(conf):
+        conf = 0.50
     # Clamp conf to a useful range — we never trust a single observation
     # above 0.99 (always leave room for it to be wrong).
     conf = max(0.50, min(conf, 0.99))
