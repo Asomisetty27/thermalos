@@ -195,8 +195,12 @@ class _CurveTracker:
         if ts - self._last_snap_ts >= SNAPSHOT_INTERVAL:
             ic, gap = self._curve_stats()
             if ic is not None and gap is not None:
-                # Store time in days from first snapshot for slope computation
-                origin = self._snapshots[0][0] if self._snapshots else 0.0
+                # Accumulate time in days from the PREVIOUS snapshot. Anchoring
+                # to snapshots[0] (the old code) collapsed every snapshot after
+                # the first onto the same x-coordinate, which inflated fitted
+                # drift rates ~12× (a 0.024 C/W/day drift fit out as 0.30) —
+                # enough to diagnose dust on noise.
+                origin = self._snapshots[-1][0] if self._snapshots else 0.0
                 self._snapshots.append((origin + (ts - self._last_snap_ts) / 86400.0,
                                         ic, gap))
                 self._last_snap_ts = ts
