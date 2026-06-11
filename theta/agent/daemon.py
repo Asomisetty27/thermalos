@@ -19,6 +19,7 @@ import asyncio
 import json
 import signal
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -184,6 +185,11 @@ class ThetaAgent:
 
         self._tick_count  = 0
         self._alert_count = 0
+        # Per-stage error counters — populated by _stage() when an advisory
+        # pipeline stage fails. Surfaced in status() so a silently-broken
+        # enrichment stage is visible to `theta status` instead of only as
+        # log noise.
+        self._stage_errors: dict[str, int] = {}
 
         # ── Self-improvement modules ──────────────────────────────────────────
         # Profile learner: fires once per GPU when enough load samples
@@ -207,6 +213,30 @@ class ThetaAgent:
             router.add(FileAlerter(self.config.alert_log_path))
         return router
 
+    @contextmanager
+    def _stage(self, name: str, gpu: int):
+        """
+        Error-isolation boundary for ADVISORY pipeline stages.
+
+        Before this existed, a deterministic exception in any enrichment
+        stage (fault classifier, CNN feed, telemetry, DCGM…) aborted the
+        remainder of _process_sample for that tick via the outer
+        pipeline_error handler — including the state machine and alert
+        routing. A bug in a nice-to-have stage could permanently kill core
+        alerting while the daemon still looked alive.
+
+        The critical path (baseline → R_θ → window → classify → temporal
+        filter → state machine → alert routing) is deliberately NOT wrapped:
+        if it breaks, the tick is genuinely unusable and the outer handler
+        should own it.
+        """
+        try:
+            yield
+        except Exception as exc:
+            self._stage_errors[name] = self._stage_errors.get(name, 0) + 1
+            log.error("stage_error", stage=name, gpu=gpu,
+                      count=self._stage_errors[name], exc_info=exc)
+
     async def _process_sample(self, raw_sample) -> None:
         """Process one GPU sample through the full pipeline."""
         gpu = raw_sample.gpu_index
@@ -217,62 +247,66 @@ class ThetaAgent:
         self._gpu_power[gpu] = raw_sample.power_w
 
         # XID parsing runs once per minute (rate-limited internally)
-        for xid_gpu, xid, xid_count in self._xid_parser.poll(ts):
-            xid_alert = self._xid_parser.make_alert(xid_gpu, xid, xid_count, ts)
-            if xid_alert:
-                self._alert_count += 1
-                self._exporter.record_alert(xid_alert)
-                await self._router.route(xid_alert)
-                log.warning("xid_event", gpu=xid_gpu, xid=xid, category=xid_alert.context.get("xid_category"))
+        with self._stage("xid_parser", gpu):
+            for xid_gpu, xid, xid_count in self._xid_parser.poll(ts):
+                xid_alert = self._xid_parser.make_alert(xid_gpu, xid, xid_count, ts)
+                if xid_alert:
+                    self._alert_count += 1
+                    self._exporter.record_alert(xid_alert)
+                    await self._router.route(xid_alert)
+                    log.warning("xid_event", gpu=xid_gpu, xid=xid, category=xid_alert.context.get("xid_category"))
 
         # ── Poll latency tracking (monitoring pipeline observability) ─────────
-        lat = raw_sample.poll_latency_s
-        alpha = 0.1
-        ema = self._poll_latency_ema.get(gpu, lat)
-        new_ema = ema * (1 - alpha) + lat * alpha
-        self._poll_latency_ema[gpu] = new_ema
+        with self._stage("poll_latency", gpu):
+            lat = raw_sample.poll_latency_s
+            alpha = 0.1
+            ema = self._poll_latency_ema.get(gpu, lat)
+            new_ema = ema * (1 - alpha) + lat * alpha
+            self._poll_latency_ema[gpu] = new_ema
 
-        n = self._poll_latency_samples.get(gpu, 0) + 1
-        self._poll_latency_samples[gpu] = n
-        if n == 20:  # establish baseline after warm-up
-            self._poll_latency_baseline[gpu] = new_ema
+            n = self._poll_latency_samples.get(gpu, 0) + 1
+            self._poll_latency_samples[gpu] = n
+            if n == 20:  # establish baseline after warm-up
+                self._poll_latency_baseline[gpu] = new_ema
 
-        baseline_lat = self._poll_latency_baseline.get(gpu)
-        if baseline_lat and new_ema > baseline_lat * 2.5 and n > 20:
-            last_lat_alert = self._poll_latency_alert_ts.get(gpu, 0.0)
-            if ts - last_lat_alert > 300:
-                self._poll_latency_alert_ts[gpu] = ts
-                lat_alert = AlertEvent(
-                    gpu_index=gpu, timestamp=ts,
-                    state=GPUState.UNKNOWN, prev_state=GPUState.UNKNOWN,
-                    rtheta=None, rtheta_baseline=None, drift_sigma=None,
-                    confidence=0.75,
-                    message=(
-                        f"[WARNING] GPU {gpu} — NVML poll latency {new_ema*1000:.1f}ms "
-                        f"({new_ema/baseline_lat:.1f}× baseline {baseline_lat*1000:.1f}ms). "
-                        f"GPU may be hanging or driver is unresponsive. "
-                        f"Monitor closely — abrupt failure possible."
-                    ),
-                    context={"severity": "warning", "poll_latency_ms": round(new_ema*1000, 2),
-                             "baseline_ms": round(baseline_lat*1000, 2)},
-                )
-                self._alert_count += 1
-                self._exporter.record_alert(lat_alert)
-                await self._router.route(lat_alert)
+            baseline_lat = self._poll_latency_baseline.get(gpu)
+            if baseline_lat and new_ema > baseline_lat * 2.5 and n > 20:
+                last_lat_alert = self._poll_latency_alert_ts.get(gpu, 0.0)
+                if ts - last_lat_alert > 300:
+                    self._poll_latency_alert_ts[gpu] = ts
+                    lat_alert = AlertEvent(
+                        gpu_index=gpu, timestamp=ts,
+                        state=GPUState.UNKNOWN, prev_state=GPUState.UNKNOWN,
+                        rtheta=None, rtheta_baseline=None, drift_sigma=None,
+                        confidence=0.75,
+                        message=(
+                            f"[WARNING] GPU {gpu} — NVML poll latency {new_ema*1000:.1f}ms "
+                            f"({new_ema/baseline_lat:.1f}× baseline {baseline_lat*1000:.1f}ms). "
+                            f"GPU may be hanging or driver is unresponsive. "
+                            f"Monitor closely — abrupt failure possible."
+                        ),
+                        context={"severity": "warning", "poll_latency_ms": round(new_ema*1000, 2),
+                                 "baseline_ms": round(baseline_lat*1000, 2)},
+                    )
+                    self._alert_count += 1
+                    self._exporter.record_alert(lat_alert)
+                    await self._router.route(lat_alert)
 
         # 0a. DCGM enrichment — fills NVLink/PCIe/engine fields if nv-hostengine available
-        if self._dcgm is not None:
-            self._dcgm.enrich(gpu, raw_sample)
+        with self._stage("dcgm_enrich", gpu):
+            if self._dcgm is not None:
+                self._dcgm.enrich(gpu, raw_sample)
 
         # 0b. Silicon-level checks: ECC, micro-throttle, XID semantic parsing
-        for silicon_alert in (
-            self._ecc_monitor.update(raw_sample),
-            self._micro_throttle.update(raw_sample),
-        ):
-            if silicon_alert is not None:
-                self._alert_count += 1
-                self._exporter.record_alert(silicon_alert)
-                await self._router.route(silicon_alert)
+        with self._stage("silicon", gpu):
+            for silicon_alert in (
+                self._ecc_monitor.update(raw_sample),
+                self._micro_throttle.update(raw_sample),
+            ):
+                if silicon_alert is not None:
+                    self._alert_count += 1
+                    self._exporter.record_alert(silicon_alert)
+                    await self._router.route(silicon_alert)
 
         # 1. Update virtual ambient — hard lock on first idle window,
         #    soft exponential-smoothing update during long-run transient idles.
@@ -325,17 +359,18 @@ class ThetaAgent:
         # Feed CNN predictor buffer — silently ignored when no model loaded.
         # We push every stable window so the model has a continuous time series
         # to convolve over (not just alert-time spot checks).
-        sm_max_for_cnn = raw_sample.sm_clock_max_mhz
-        clock_eff_for_cnn = (
-            raw_sample.clock_sm_mhz / sm_max_for_cnn if sm_max_for_cnn else 0.0
-        )
-        self._cnn_predictor.update(gpu, ts, {
-            "rtheta":    enriched.rtheta or 0.0,
-            "power_w":   raw_sample.power_w,
-            "temp_c":    raw_sample.temp_junction,
-            "util_pct":  raw_sample.util_pct,
-            "clock_eff": clock_eff_for_cnn,
-        })
+        with self._stage("cnn_feed", gpu):
+            sm_max_for_cnn = raw_sample.sm_clock_max_mhz
+            clock_eff_for_cnn = (
+                raw_sample.clock_sm_mhz / sm_max_for_cnn if sm_max_for_cnn else 0.0
+            )
+            self._cnn_predictor.update(gpu, ts, {
+                "rtheta":    enriched.rtheta or 0.0,
+                "power_w":   raw_sample.power_w,
+                "temp_c":    raw_sample.temp_junction,
+                "util_pct":  raw_sample.util_pct,
+                "clock_eff": clock_eff_for_cnn,
+            })
 
         classified = ClassifiedSample(
             enriched     = enriched,
@@ -350,94 +385,99 @@ class ThetaAgent:
         self._exporter.update_silicon(gpu, raw_sample.ecc_sbit, raw_sample.ecc_dbit, clock_eff)
 
         # 5. Drift detection + unsupervised critic
+        # (detector itself is CRITICAL path — the state machine consumes drift)
         drift = self._detector.update(gpu, ts, window.rtheta_mean, state)
 
-        # Feed healthy windows to the Isolation Forest baseline
-        healthy = state in (GPUState.CLEAN_IDLE, GPUState.UNDER_LOAD)
-        if healthy:
-            self._critic.update_healthy(gpu, window)
+        with self._stage("critic", gpu):
+            # Feed healthy windows to the Isolation Forest baseline
+            healthy = state in (GPUState.CLEAN_IDLE, GPUState.UNDER_LOAD)
+            if healthy:
+                self._critic.update_healthy(gpu, window)
 
-        # Score and check for critic/supervised disagreement
-        critic_alert = self._critic.maybe_alert(gpu, window, state, ts)
-        if critic_alert is not None:
-            self._alert_count += 1
-            self._exporter.record_alert(critic_alert)
-            await self._router.route(critic_alert)
-            # Track disagreement for model drift monitoring
-            self._critic_disagree[gpu] = self._critic_disagree.get(gpu, 0) + 1
-        self._critic_total[gpu] = self._critic_total.get(gpu, 0) + 1
+            # Score and check for critic/supervised disagreement
+            critic_alert = self._critic.maybe_alert(gpu, window, state, ts)
+            if critic_alert is not None:
+                self._alert_count += 1
+                self._exporter.record_alert(critic_alert)
+                await self._router.route(critic_alert)
+                # Track disagreement for model drift monitoring
+                self._critic_disagree[gpu] = self._critic_disagree.get(gpu, 0) + 1
+            self._critic_total[gpu] = self._critic_total.get(gpu, 0) + 1
+
         self._exporter.update_drift(drift)
         self._exporter.update_state(gpu, state)
 
         # Profile learner — accumulate load R_θ samples toward upgrade signal
-        _gpu_name_pl = self._collector_gpu_names.get(gpu, "unknown") if hasattr(self, "_collector_gpu_names") else "unknown"
-        self._profile_learner.update(
-            gpu_index  = gpu,
-            gpu_name   = _gpu_name_pl,
-            rtheta_mean= window.rtheta_mean,
-            power_w    = raw_sample.power_w,
-            is_stable  = window.is_stable,
-        )
+        with self._stage("profile_learner", gpu):
+            _gpu_name_pl = self._collector_gpu_names.get(gpu, "unknown") if hasattr(self, "_collector_gpu_names") else "unknown"
+            self._profile_learner.update(
+                gpu_index  = gpu,
+                gpu_name   = _gpu_name_pl,
+                rtheta_mean= window.rtheta_mean,
+                power_w    = raw_sample.power_w,
+                is_stable  = window.is_stable,
+            )
 
         # 5b. Fault curve classifier — R_theta curve shape analysis (dust/TIM/fan/blockage)
-        fault = self._fault_classifier.update(
-            gpu_index = gpu,
-            ts        = ts,
-            rtheta    = window.rtheta_mean,
-            power_w   = raw_sample.power_w,
-            mem_util  = raw_sample.mem_util_pct,
-            fan_pct   = raw_sample.fan_speed_pct,
-        )
-        if fault is not None:
-            self._exporter.update_fault_diagnosis(fault)
-            # Populate the agent-details cache so the /api/v1/agent/gpu/{i}/details
-            # endpoint can serve rich state (causal explanation + maintenance score)
-            # to the site's Agent Control Center on every poll.
-            self._update_agent_details_cache(
-                gpu=gpu, ts=ts,
-                filtered=filtered, raw_state=raw_state, raw_confidence=raw_confidence,
-                fault=fault, window=window, drift=drift,
-                power_w=raw_sample.power_w, ecc_dbit=raw_sample.ecc_dbit,
-                inlet_temp_c=getattr(raw_sample, "inlet_temp_c", None),
+        with self._stage("fault_classifier", gpu):
+            fault = self._fault_classifier.update(
+                gpu_index = gpu,
+                ts        = ts,
+                rtheta    = window.rtheta_mean,
+                power_w   = raw_sample.power_w,
+                mem_util  = raw_sample.mem_util_pct,
+                fan_pct   = raw_sample.fan_speed_pct,
             )
-            if fault.cause not in (FaultCause.NOMINAL, FaultCause.INSUFFICIENT_DATA):
-                fault_alert = AlertEvent(
-                    gpu_index       = gpu,
-                    timestamp       = ts,
-                    state           = state,
-                    prev_state      = state,
-                    rtheta          = window.rtheta_mean,
-                    rtheta_baseline = drift.baseline_mean,
-                    drift_sigma     = drift.sigma_score,
-                    confidence      = fault.confidence,
-                    message         = (
-                        f"[FAULT] GPU {gpu} — {fault.cause.value.replace('_', ' ').upper()}. "
-                        f"{fault.remediation} "
-                        f"R_θ intercept={fault.intercept:.3f} C/W, gap={fault.gap:.3f} C/W "
-                        f"(confidence {fault.confidence:.0%})"
-                    ),
-                    context         = {
-                        "severity":    "warning",
-                        "fault_cause": fault.cause.value,
-                        "confidence":  fault.confidence,
-                        "intercept":   fault.intercept,
-                        "gap":         fault.gap,
-                        "curve_slope": fault.curve_slope,
-                        "drift_rate":  fault.drift_rate,
-                        "gap_trend":   fault.gap_trend,
-                        "remediation": fault.remediation,
-                        **fault.evidence,
-                    },
+            if fault is not None:
+                self._exporter.update_fault_diagnosis(fault)
+                # Populate the agent-details cache so the /api/v1/agent/gpu/{i}/details
+                # endpoint can serve rich state (causal explanation + maintenance score)
+                # to the site's Agent Control Center on every poll.
+                self._update_agent_details_cache(
+                    gpu=gpu, ts=ts,
+                    filtered=filtered, raw_state=raw_state, raw_confidence=raw_confidence,
+                    fault=fault, window=window, drift=drift,
+                    power_w=raw_sample.power_w, ecc_dbit=raw_sample.ecc_dbit,
+                    inlet_temp_c=getattr(raw_sample, "inlet_temp_c", None),
                 )
-                self._alert_count += 1
-                self._exporter.record_alert(fault_alert)
-                await self._router.route(fault_alert)
-                log.info("fault_classified",
-                         gpu=gpu,
-                         cause=fault.cause.value,
-                         confidence=fault.confidence,
-                         intercept=fault.intercept,
-                         gap=fault.gap)
+                if fault.cause not in (FaultCause.NOMINAL, FaultCause.INSUFFICIENT_DATA):
+                    fault_alert = AlertEvent(
+                        gpu_index       = gpu,
+                        timestamp       = ts,
+                        state           = state,
+                        prev_state      = state,
+                        rtheta          = window.rtheta_mean,
+                        rtheta_baseline = drift.baseline_mean,
+                        drift_sigma     = drift.sigma_score,
+                        confidence      = fault.confidence,
+                        message         = (
+                            f"[FAULT] GPU {gpu} — {fault.cause.value.replace('_', ' ').upper()}. "
+                            f"{fault.remediation} "
+                            f"R_θ intercept={fault.intercept:.3f} C/W, gap={fault.gap:.3f} C/W "
+                            f"(confidence {fault.confidence:.0%})"
+                        ),
+                        context         = {
+                            "severity":    "warning",
+                            "fault_cause": fault.cause.value,
+                            "confidence":  fault.confidence,
+                            "intercept":   fault.intercept,
+                            "gap":         fault.gap,
+                            "curve_slope": fault.curve_slope,
+                            "drift_rate":  fault.drift_rate,
+                            "gap_trend":   fault.gap_trend,
+                            "remediation": fault.remediation,
+                            **fault.evidence,
+                        },
+                    )
+                    self._alert_count += 1
+                    self._exporter.record_alert(fault_alert)
+                    await self._router.route(fault_alert)
+                    log.info("fault_classified",
+                             gpu=gpu,
+                             cause=fault.cause.value,
+                             confidence=fault.confidence,
+                             intercept=fault.intercept,
+                             gap=fault.gap)
 
         # 6. State machine → maybe alert
         alert = self._statemachine.transition(classified, drift)
@@ -468,77 +508,81 @@ class ThetaAgent:
                 )
 
         # 7. Predictive alert — warn before the threshold is crossed
-        if drift.is_predictive:
-            eta_min = round(drift.eta_to_drift_s / 60, 1) if drift.eta_to_drift_s else "?"
-            pred_alert = AlertEvent(
-                gpu_index       = gpu,
-                timestamp       = ts,
-                state           = state,
-                prev_state      = state,
-                rtheta          = window.rtheta_mean,
-                rtheta_baseline = drift.baseline_mean,
-                drift_sigma     = drift.sigma_score,
-                confidence      = 0.8,
-                message         = (
-                    f"[WARNING] GPU {gpu} — predictive thermal drift. "
-                    f"R_θ trending at +{drift.trend_slope:.5f} C/W·s. "
-                    f"Estimated {eta_min} min until drift threshold. "
-                    f"No action required yet — monitor closely."
-                ),
-                context         = {
-                    "severity":    "warning",
-                    "predictive":  True,
-                    "eta_minutes": eta_min,
-                    "trend_slope": drift.trend_slope,
-                },
-            )
-            self._alert_count += 1
-            self._exporter.record_alert(pred_alert)
-            await self._router.route(pred_alert)
-            log.info("predictive_warning", gpu=gpu, eta_min=eta_min, slope=drift.trend_slope)
+        with self._stage("predictive_alert", gpu):
+            if drift.is_predictive:
+                eta_min = round(drift.eta_to_drift_s / 60, 1) if drift.eta_to_drift_s else "?"
+                pred_alert = AlertEvent(
+                    gpu_index       = gpu,
+                    timestamp       = ts,
+                    state           = state,
+                    prev_state      = state,
+                    rtheta          = window.rtheta_mean,
+                    rtheta_baseline = drift.baseline_mean,
+                    drift_sigma     = drift.sigma_score,
+                    confidence      = 0.8,
+                    message         = (
+                        f"[WARNING] GPU {gpu} — predictive thermal drift. "
+                        f"R_θ trending at +{drift.trend_slope:.5f} C/W·s. "
+                        f"Estimated {eta_min} min until drift threshold. "
+                        f"No action required yet — monitor closely."
+                    ),
+                    context         = {
+                        "severity":    "warning",
+                        "predictive":  True,
+                        "eta_minutes": eta_min,
+                        "trend_slope": drift.trend_slope,
+                    },
+                )
+                self._alert_count += 1
+                self._exporter.record_alert(pred_alert)
+                await self._router.route(pred_alert)
+                log.info("predictive_warning", gpu=gpu, eta_min=eta_min, slope=drift.trend_slope)
 
         # 8a. Failure predictor — update and check for degradation risk alert
-        self._predictor.update(
-            gpu_index  = gpu,
-            ts         = ts,
-            rtheta     = window.rtheta_mean if window.is_stable else None,
-            drift      = drift,
-            ecc_sbit   = raw_sample.ecc_sbit,
-            ecc_dbit   = raw_sample.ecc_dbit,
-            clock_eff  = clock_eff,
-        )
-        risk_alert = self._predictor.maybe_alert(gpu, ts, state)
-        if risk_alert is not None:
-            self._alert_count += 1
-            self._exporter.record_alert(risk_alert)
-            await self._router.route(risk_alert)
-            log.info("degradation_risk_alert", gpu=gpu, score=risk_alert.context.get("degradation_risk"))
-        self._exporter.update_risk(gpu, self._predictor.get_score(gpu))
+        with self._stage("failure_predictor", gpu):
+            self._predictor.update(
+                gpu_index  = gpu,
+                ts         = ts,
+                rtheta     = window.rtheta_mean if window.is_stable else None,
+                drift      = drift,
+                ecc_sbit   = raw_sample.ecc_sbit,
+                ecc_dbit   = raw_sample.ecc_dbit,
+                clock_eff  = clock_eff,
+            )
+            risk_alert = self._predictor.maybe_alert(gpu, ts, state)
+            if risk_alert is not None:
+                self._alert_count += 1
+                self._exporter.record_alert(risk_alert)
+                await self._router.route(risk_alert)
+                log.info("degradation_risk_alert", gpu=gpu, score=risk_alert.context.get("degradation_risk"))
+            self._exporter.update_risk(gpu, self._predictor.get_score(gpu))
 
         # 8b. Telemetry — record window for Intelligence Network (if opted in)
-        gpu_name = getattr(raw_sample, 'gpu_name', '') if hasattr(raw_sample, 'gpu_name') else ''
-        sm_max = getattr(raw_sample, 'sm_clock_max_mhz', 0)
-        clock_eff = (raw_sample.clock_sm_mhz / sm_max) if sm_max > 0 else None
-        self._telemetry.record_window(
-            gpu_name       = gpu_name,
-            rtheta_mean    = enriched.rtheta,
-            rtheta_std     = window.rtheta_std if window.is_stable else None,
-            ecc_sbit_rate  = float(raw_sample.ecc_sbit),
-            ecc_dbit_event = raw_sample.ecc_dbit > 0,
-            clock_eff_mean = clock_eff,
-        )
-        await self._telemetry.maybe_flush()
+        with self._stage("telemetry", gpu):
+            gpu_name = getattr(raw_sample, 'gpu_name', '') if hasattr(raw_sample, 'gpu_name') else ''
+            sm_max = getattr(raw_sample, 'sm_clock_max_mhz', 0)
+            clock_eff = (raw_sample.clock_sm_mhz / sm_max) if sm_max > 0 else None
+            self._telemetry.record_window(
+                gpu_name       = gpu_name,
+                rtheta_mean    = enriched.rtheta,
+                rtheta_std     = window.rtheta_std if window.is_stable else None,
+                ecc_sbit_rate  = float(raw_sample.ecc_sbit),
+                ecc_dbit_event = raw_sample.ecc_dbit > 0,
+                clock_eff_mean = clock_eff,
+            )
+            await self._telemetry.maybe_flush()
 
         # 9. Fleet correlation — detect cross-GPU anomalies after each sample
-        fleet_alert = self._correlator.check(
-            {g: r.current_state for g, r in self._statemachine.all_states().items()},
-            ts,
-        )
-        if fleet_alert is not None:
-            self._alert_count += 1
-            self._exporter.record_alert(fleet_alert)
-            await self._router.route(fleet_alert)
-            log.warning("fleet_event", affected=fleet_alert.context.get("fleet_gpus"))
+        with self._stage("fleet_correlator", gpu):
+            fleet_alert = self._correlator.check(
+                {g: r.current_state for g, r in self._statemachine.all_states().items()},
+                ts,
+            )
+            if fleet_alert is not None:
+                self._alert_count += 1
+                self._exporter.record_alert(fleet_alert)
+                await self._router.route(fleet_alert)
+                log.warning("fleet_event", affected=fleet_alert.context.get("fleet_gpus"))
 
     def _update_agent_details_cache(
         self, *, gpu: int, ts: float, filtered, raw_state, raw_confidence,
@@ -1102,4 +1146,7 @@ class ThetaAgent:
             "alerts":       self._alert_count,
             "classifier":   self._classifier.mode,
             "gpus":         states,
+            # Advisory-stage failures (see _stage) — nonzero counts mean an
+            # enrichment stage is broken but core alerting is still running.
+            "stage_errors": dict(self._stage_errors),
         }
